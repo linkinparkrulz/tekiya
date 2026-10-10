@@ -1,0 +1,9 @@
+.git
+node_modules
+dist
+private
+backups
+.env
+pairing*.json
+signature*.txt
+*.sqlite*

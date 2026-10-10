@@ -1,0 +1,9 @@
+# Merge these lines into the existing host Tor configuration.
+# Do not replace existing Dojo or other onion-service entries.
+
+HiddenServiceDir /var/lib/tor/nymdispenser/
+HiddenServiceVersion 3
+HiddenServicePort 80 127.0.0.1:8088
+
+# The application also needs a loopback SOCKS listener.
+# Add SocksPort 127.0.0.1:9050 only if one is not already configured.

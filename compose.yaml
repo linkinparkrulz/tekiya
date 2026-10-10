@@ -1,0 +1,45 @@
+services:
+  app:
+    build: .
+    environment:
+      NYM_NETWORK: ${NYM_NETWORK:-testnet4}
+      NYM_DATA: /data
+      NYM_TOR_PROXY: socks5h://tor:9050
+      NYM_LISTEN_HOST: 0.0.0.0
+      NYM_PORT: "8088"
+    volumes:
+      - app-data:/data
+    networks:
+      - private
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  tor:
+    build:
+      context: deploy
+      dockerfile: Tor.Dockerfile
+    volumes:
+      - tor-data:/var/lib/tor
+    networks:
+      - private
+      - outbound
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+networks:
+  private:
+    internal: true
+  outbound: {}
+
+volumes:
+  app-data: {}
+  tor-data: {}

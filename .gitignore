@@ -1,0 +1,16 @@
+node_modules/
+dist/
+private/
+backups/
+.env
+.env.*
+!.env.example
+pairing*.json
+signature*.txt
+*.key
+*.pem
+*.seed
+*.mnemonic
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

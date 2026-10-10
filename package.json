@@ -1,0 +1,28 @@
+{
+  "name": "tekiya",
+  "version": "0.3.0-dev",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "cli": "node dist/src/cli.js",
+    "start": "node dist/src/cli.js serve"
+  },
+  "dependencies": {
+    "@dojo-tools/bip47": "2.0.1",
+    "@dojo-tools/bitcoinjs-message": "4.0.1",
+    "bip32": "5.0.1",
+    "bitcoinjs-lib": "7.0.1",
+    "tiny-secp256k1": "2.2.3",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.0",
+    "typescript": "5.9.3"
+  }
+}

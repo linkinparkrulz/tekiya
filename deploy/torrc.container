@@ -1,0 +1,6 @@
+DataDirectory /var/lib/tor
+SocksPort 0.0.0.0:9050
+Log notice stdout
+HiddenServiceDir /var/lib/tor/nymdispenser
+HiddenServiceVersion 3
+HiddenServicePort 80 app:8088

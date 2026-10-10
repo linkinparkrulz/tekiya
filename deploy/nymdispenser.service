@@ -1,0 +1,35 @@
+[Unit]
+Description=Tekiya development API
+After=network.target tor.service
+
+[Service]
+Type=simple
+User=nymdispenser
+Group=nymdispenser
+WorkingDirectory=/opt/nymdispenser
+Environment=NYM_DATA=/var/lib/nymdispenser
+Environment=NYM_NETWORK=testnet4
+Environment=NYM_TOR_PROXY=socks5h://127.0.0.1:9050
+Environment=NYM_PORT=8088
+ExecStart=/usr/bin/node /opt/nymdispenser/dist/src/cli.js serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+StateDirectory=nymdispenser
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/nymdispenser
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target
