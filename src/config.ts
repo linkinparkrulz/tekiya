@@ -26,6 +26,16 @@ export const profiles: Record<NetworkName, NetworkProfile> = {
 
 export const ISSUANCE_LIMIT = 5;
 
+// Indices registered with the Dojo ahead of the next allocation.
+export const REGISTRATION_POOL = 3;
+
+// Receiving-wallet BIP47 lookahead (Ashigaru: 3). An index is issued
+// only while it lies within that window past the last confirmed payment.
+export const RECEIVER_LOOKAHEAD = 3;
+
+// Issuance is temporarily unavailable; nothing was allocated.
+export class Unavailable extends Error {}
+
 export function requireCondition(
   condition: unknown,
   message: string,

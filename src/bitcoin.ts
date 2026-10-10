@@ -56,6 +56,19 @@ export function deriveAddress(config: Config, index: number): string {
     .getPaymentAddress(sender, index, "p2wpkh");
 }
 
+// Hex public key of the address deriveAddress returns at this index.
+export function derivePaymentPubkey(config: Config, index: number): string {
+  requireCondition(
+    Number.isSafeInteger(index) && index >= 0 && index < ISSUANCE_LIMIT,
+    "Index outside the development issuance range",
+  );
+  const sender = createWallet(config.seedHex, config.network).sender;
+  return Buffer.from(
+    receiver(config.merchantCode, config.network)
+      .derivePaymentPublicKey(sender, index),
+  ).toString("hex");
+}
+
 export function buildNotification(
   config: Config,
   fundingHex: string,

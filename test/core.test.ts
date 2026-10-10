@@ -95,21 +95,23 @@ test("allocation is idempotent, bounded, and does not reuse indices", () => {
   const store = new Store(":memory:");
   try {
     const derive = (index: number): string => `address-${index}`;
+    for (let i = 0; i < 5; i++) store.register(i, derive(i));
+    const options = { enforceLookahead: false };
     const id = "request_0000000001";
     assert.deepEqual(
-      store.allocate(id, 1000, derive),
-      store.allocate(id, 1000, derive),
+      store.allocate(id, 1000, derive, options),
+      store.allocate(id, 1000, derive, options),
     );
-    assert.throws(() => store.allocate(id, 2000, derive));
+    assert.throws(() => store.allocate(id, 2000, derive, options));
 
     for (let i = 1; i < 5; i++) {
       assert.equal(
-        store.allocate(`request_000000000${i + 1}`, 0, derive).idx,
+        store.allocate(`request_000000000${i + 1}`, 0, derive, options).idx,
         i,
       );
     }
     assert.throws(() =>
-      store.allocate("request_0000000006", 0, derive));
+      store.allocate("request_0000000006", 0, derive, options));
   } finally {
     store.close();
   }

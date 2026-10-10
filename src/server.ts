@@ -2,12 +2,16 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
 import { z } from "zod";
 import {
-  Approval, Pending, requireCondition, type Config,
+  Approval, Pairing, Pending, Unavailable, requireCondition, type Config,
 } from "./config.js";
 import {
   createWallet, deriveAddress, identityStatement, verifyIdentity,
 } from "./bitcoin.js";
 import { Store } from "./store.js";
+import { syncDojo } from "./registrar.js";
+import { connectDojo } from "./tor.js";
+
+const SYNC_INTERVAL_MS = 60000;
 
 export function requireApproval(store: Store, config: Config): Pending {
   const pending = store.get("notification", Pending);
@@ -71,6 +75,9 @@ export function serve(store: Store, config: Config): void {
           application: "Tekiya",
           network: config.network,
           ready,
+          issuing: ready && !store.issuanceBlocker(
+            index => deriveAddress(config, index),
+          ),
         });
         return;
       }
@@ -131,11 +138,35 @@ export function serve(store: Store, config: Config): void {
         network: config.network,
       });
     } catch (error) {
-      reply(400, {
+      reply(error instanceof Unavailable ? 503 : 400, {
         error: error instanceof Error ? error.message : "Request failed",
       });
     }
   });
+
+  // Requests never wait on Tor: they are served only from addresses this
+  // loop has already registered.
+  let syncing = false;
+  const sync = async (): Promise<void> => {
+    if (syncing) return;
+    syncing = true;
+    try {
+      const pairing = store.get("pairing", Pairing);
+      requireCondition(pairing, "No Dojo pairing");
+      const result = await syncDojo(
+        store, config, await connectDojo(pairing, config.network),
+      );
+      if (result.halted) console.error(result.halted);
+    } catch (error) {
+      console.error(`Dojo sync failed: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`);
+    } finally {
+      syncing = false;
+    }
+  };
+  void sync();
+  const timer = setInterval(() => void sync(), SYNC_INTERVAL_MS);
 
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
@@ -149,6 +180,7 @@ export function serve(store: Store, config: Config): void {
   });
 
   const shutdown = (): void => {
+    clearInterval(timer);
     server.close(() => {
       store.close();
       process.exit(0);

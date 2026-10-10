@@ -23,6 +23,33 @@ subdirectory. A network change never converts the existing wallet.
 
 Dojo pairing network labels are operator assertions, not chain proofs.
 
+## Dojo address registration
+
+The paired Dojo is assumed to be the one the merchant wallet uses.
+
+Before an address can be issued, it is registered with that Dojo through
+a first `active=` lookup of its payment public key. Dojo then tracks it,
+and a later `new=` declaration by the receiving wallet (as Ashigaru's
+Resync Paynym sends) cannot suppress its history. `pair` registers the
+first addresses immediately. `serve` keeps three addresses registered
+ahead of the next allocation and rechecks every minute.
+
+The same lookups record confirmed payments. An address is issued only
+while it is within three indices of the last confirmed payment, matching
+the receiving wallet's lookahead. Past that, the API returns 503 until a
+payment confirms. Unpaid addresses are never recycled.
+
+History on an address that was never issued indicates a cloned
+installation or a stale backup. Issuance then halts until the cause is
+investigated and `resume-issuance --recovery-reviewed` is run.
+
+Running `pair` again replaces the pairing and re-registers every address
+with the new Dojo. Re-pair Tekiya first, and move the merchant wallet only
+after a successful sync, so the new Dojo imports existing payments before
+the wallet can declare those addresses new.
+
+Registration links address issuance to the paired Dojo's operator.
+
 ## Commands
 
 Run commands using npm run cli -- COMMAND.
@@ -32,6 +59,9 @@ Run commands using npm run cli -- COMMAND.
 - token
 - directory
 - pair PRIVATE_PAIRING_FILE
+- sync
+- status
+- resume-issuance --recovery-reviewed
 - prepare FUNDING_TXID VOUT FEE_SATS
 - broadcast PREPARED_NOTIFICATION_TXID
 - test-address

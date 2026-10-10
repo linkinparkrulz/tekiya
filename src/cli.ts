@@ -14,6 +14,7 @@ import {
   identityStatement, receiver, reconstruct, verifyIdentity,
 } from "./bitcoin.js";
 import { Store } from "./store.js";
+import { syncDojo } from "./registrar.js";
 import { connectDojo, DIRECTORY, torJson } from "./tor.js";
 import { serve } from "./server.js";
 
@@ -103,7 +104,7 @@ async function main(): Promise<void> {
       return pending;
     };
 
-    const confirmedNotification = async (): Promise<Pending> => {
+    const confirmedNotification = async () => {
       const pending = getPending();
       reconstruct(config, pending);
       const api = await connectDojo(getPairing(), network);
@@ -114,7 +115,7 @@ async function main(): Promise<void> {
         Transaction.fromHex(observed.hex).getId() === pending.txid,
         "Backend returned the wrong notification transaction",
       );
-      return pending;
+      return { pending, api };
     };
 
     switch (command) {
@@ -145,10 +146,63 @@ async function main(): Promise<void> {
         const pairing = Pairing.parse(
           JSON.parse(readFileSync(filename, "utf8")) as unknown,
         );
-        await connectDojo(pairing, network);
-        store.insert("pairing", pairing);
+        const api = await connectDojo(pairing, network);
+        const replaced = Boolean(store.get("pairing", Pairing));
+        store.replacePairing(pairing);
         print("Dojo login succeeded; the configured network label matches.");
         print("Backend chain identity has not been independently proven.");
+        print("The merchant wallet is assumed to use this same Dojo.");
+        if (replaced) {
+          print("Previous pairing replaced; its registrations were cleared.");
+        }
+        try {
+          print({ sync: await syncDojo(store, config, api) });
+        } catch (error) {
+          print(`Address registration failed: ${
+            error instanceof Error ? error.message : "unknown error"
+          }. Run sync before serving.`);
+        }
+        if (replaced) {
+          print("Switch the merchant wallet to this Dojo only after a " +
+            "successful sync, so existing payments are imported first.");
+        }
+        break;
+      }
+
+      case "sync": {
+        const api = await connectDojo(getPairing(), network);
+        print(await syncDojo(store, config, api));
+        break;
+      }
+
+      case "status": {
+        const blocker = store.issuanceBlocker(
+          index => deriveAddress(config, index),
+        );
+        print({
+          network,
+          nextIndex: store.nextIndex(),
+          lastConfirmedPayment: store.lastConfirmedPayment(),
+          registered: store.db.prepare(
+            "SELECT idx FROM registrations ORDER BY idx",
+          ).all().map(row => row.idx),
+          payments: store.db.prepare(
+            "SELECT idx, txid, block_height FROM payments ORDER BY idx",
+          ).all(),
+          issuing: !blocker,
+          blocker: blocker ?? null,
+        });
+        break;
+      }
+
+      case "resume-issuance": {
+        requireCondition(
+          args[0] === "--recovery-reviewed",
+          "Usage: resume-issuance --recovery-reviewed",
+        );
+        print(store.clearHalt()
+          ? "Halt cleared."
+          : "Issuance was not halted.");
         break;
       }
 
@@ -209,7 +263,8 @@ async function main(): Promise<void> {
       }
 
       case "test-address": {
-        await confirmedNotification();
+        const { api } = await confirmedNotification();
+        await syncDojo(store, config, api);
         // Reserved locally so the compatibility test cannot cause reuse.
         const allocation = store.allocate(
           "setup_compatibility_test", 0,
@@ -228,7 +283,7 @@ async function main(): Promise<void> {
         break;
 
       case "approve": {
-        const pending = await confirmedNotification();
+        const { pending } = await confirmedNotification();
         const filename = argument(args, 0, "Usage: approve SIGNATURE_FILE");
         const signature = readFileSync(filename, "utf8").trim();
         requireCondition(
@@ -252,8 +307,9 @@ async function main(): Promise<void> {
 
       default:
         throw new Error(
-          "Commands: init, info, token, directory, pair, prepare, " +
-          "broadcast, test-address, statement, approve, serve",
+          "Commands: init, info, token, directory, pair, sync, status, " +
+          "resume-issuance, prepare, broadcast, test-address, statement, " +
+          "approve, serve",
         );
     }
   } finally {

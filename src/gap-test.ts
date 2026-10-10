@@ -2,16 +2,18 @@ import { existsSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { z } from "zod";
 import {
-  Config, Pending, requireCondition,
+  Config, Pairing, Pending, requireCondition,
 } from "./config.js";
 import {
   deriveAddress, reconstruct,
 } from "./bitcoin.js";
 import { Store } from "./store.js";
+import { syncDojo } from "./registrar.js";
+import { connectDojo } from "./tor.js";
 
 process.umask(0o077);
 
-function main(): void {
+async function main(): Promise<void> {
   requireCondition(
     process.env.NYM_NETWORK === "testnet4",
     "This diagnostic requires NYM_NETWORK=testnet4",
@@ -71,6 +73,13 @@ function main(): void {
       );
     }
 
+    const pairing = store.get("pairing", Pairing);
+    requireCondition(pairing, "Import a Dojo pairing file first");
+    const synced = await syncDojo(
+      store, config, await connectDojo(pairing, "testnet4"), { through: 4 },
+    );
+    requireCondition(!synced.halted, synced.halted ?? "");
+
     let targetAddress: string | undefined;
 
     for (let index = 1; index <= 4; index++) {
@@ -87,6 +96,8 @@ function main(): void {
           );
           return deriveAddress(config, nextIndex);
         },
+        // Deliberately exceeds the lookahead; that is what this tests.
+        { enforceLookahead: false },
       );
 
       requireCondition(
@@ -115,9 +126,7 @@ function main(): void {
   }
 }
 
-try {
-  main();
-} catch (error: unknown) {
+main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : "Gap test failed");
   process.exitCode = 1;
-}
+});
