@@ -24,7 +24,7 @@ The operator reports the issue has been fixed. General unattended dispensing sti
 
 This report intentionally excludes API keys, access and refresh tokens, account xpubs, seeds, private keys, device identifiers, and the full wallet dump. Some credentials were posted during troubleshooting; they are not reproduced here.
 
-The report intentionally omits payment codes, account public keys, credentials, and wallet dumps. Testnet addresses and transaction IDs remain where needed to reproduce the issue; sharing them links those public test activities.
+The report omits payment codes, account public keys, credentials, device identifiers, and wallet dumps. Public test addresses and transaction identifiers are minimized because they link activity to this test wallet.
 
 Evidence is distinguished as follows:
 
@@ -77,6 +77,8 @@ The tests cover sender/receiver derivation using the same BIP47 library, notific
 
 ## Setup History
 
+Personal wallet addresses, payment codes, exact transaction identifiers, and onion hostnames are redacted from this public report. They are not necessary to understand or reproduce the `new=` versus `active=` behavior with fresh test data.
+
 ### Initial Build and Fixes
 
 The first source was delivered as a generator and evolved into the TypeScript project. Two concrete setup bugs were corrected before this investigation:
@@ -92,13 +94,13 @@ The merchant and dispenser payment codes are omitted from this shareable report.
 
 | Item | Recorded value |
 | --- | --- |
-| Funding address | `tb1q5c20mp82mf46dt2q40znlxyuakajnft7hskc59` |
+| Funding address | Testnet4 P2WPKH address (redacted) |
 | Funding path | `m/84'/1'/0'/0/0` |
-| Funding transaction | `102d1723619d26f7f0c58d7127544f8240351984d5fc6bcf645de5e1d7d0d8cf` |
+| Funding transaction | Confirmed testnet4 transaction (ID redacted) |
 | Funding output | `vout 0`, 20,000 sats |
 | Confirmation observations | Initially 0; subsequently reported as 156 |
-| Notification transaction | `ed5e018a36e8b69c13d41e1aec45460aed0e033fbd3638b5e01c776bbc6d6253` |
-| Merchant notification address | `n2shg6r41GfsViEX3BQuohUuJwQ7ejTxkD` |
+| Notification transaction | Confirmed testnet4 transaction (ID redacted) |
+| Merchant notification address | Testnet4 notification output (address redacted) |
 | Notification output | 546 sats |
 | Miner fee | 236 sats |
 | Finalized notification size | 236 vB |
@@ -122,11 +124,11 @@ The following records were selected read-only from the local SQLite allocation t
 
 | Index | Request ID | Address | Test role |
 | --- | --- | --- | --- |
-| 0 | `setup_compatibility_test` | `tb1q0azk8ekqqtqxklggd2nhp32emcylzlh9esa060` | Initial successful compatibility test |
-| 1 | `setup_gap_unused_01` | `tb1q9uqy3vpqvpevy66d57ujr9f565cuvns7xg434r` | Initially unpaid; later paid for diagnosis |
-| 2 | `setup_gap_unused_02` | `tb1q3pgpk2flfq3tjzs9z0k9azlp0kdv0p3zttlutk` | Deliberately left unpaid |
-| 3 | `setup_gap_unused_03` | `tb1qqtrstcqlcecu3g5f06k06h8edk7lfylgg0r0t0` | Deliberately left unpaid |
-| 4 | `setup_gap_payment_04` | `tb1q0zdcvc9gktp5ujnt6lh74kpfjzhmelk2ne3ell` | Paid beyond the initial unpaid gap |
+| 0 | Compatibility test | Derived testnet4 address (redacted) | Initial successful compatibility test |
+| 1 | Gap test | Derived testnet4 address (redacted) | Initially unpaid; later paid for diagnosis |
+| 2 | Gap test | Derived testnet4 address (redacted) | Deliberately left unpaid |
+| 3 | Gap test | Derived testnet4 address (redacted) | Deliberately left unpaid |
+| 4 | Gap test | Derived testnet4 address (redacted) | Paid beyond the initial unpaid gap |
 
 All five staging slots are reserved. Expired or unpaid allocations must not be recycled. The application limit was not increased during this investigation.
 
@@ -140,9 +142,9 @@ The operator reported that index 4 was paid but absent from Ashigaru. The paymen
 
 | Field | Value |
 | --- | --- |
-| Transaction | `3e42ae0fd0d94ec3e563a6e91ef0998703676e358c36b0f977ab1941d2961ff1` |
+| Transaction | Confirmed testnet4 transaction (ID redacted) |
 | Output | `0` |
-| Address | `tb1q0zdcvc9gktp5ujnt6lh74kpfjzhmelk2ne3ell` |
+| Address | Index-4 derived P2WPKH address (redacted) |
 | Amount | 10,000,000,000 sats = **100 testnet4 BTC** |
 | Block | `153823` |
 
@@ -196,9 +198,9 @@ Rather than allocate index 5, the operator paid the already-reserved index 1. Th
 
 | Field | Value |
 | --- | --- |
-| Transaction | `210d8fa149dfa0d16280d109eb18785a3a4f2f86036f434bf282e619c5b24651` |
+| Transaction | Testnet4 transaction (ID redacted) |
 | Output | `1` |
-| Address | `tb1q9uqy3vpqvpevy66d57ujr9f565cuvns7xg434r` |
+| Address | Index-1 derived P2WPKH address (redacted) |
 | Amount | 5,000 sats |
 | Status at initial explorer check | Unconfirmed |
 | Wallet behavior | Operator reported immediate pending-payment display |
@@ -245,10 +247,10 @@ A read-only query selected the dispenser's saved pairing record and compared its
 }
 ```
 
-The merchant endpoint is:
+The merchant endpoint used for diagnostics was:
 
 ```text
-http://b3krcphqdbrzkblvti2eiuogfrx6b5lynenv5dxjwsw7hq47dlrc4pid.onion/test/v2/
+An HTTP v3 onion URL under `/test/v2/` (hostname redacted).
 ```
 
 The merchant pairing advertised version `1.4.5`; this was not independently verified as the exact running source revision.
@@ -262,7 +264,7 @@ The operator has public pairing/API access through Dojo Bay, not administrative 
 #### Transaction lookup
 
 ```http
-GET /test/v2/tx/3e42ae0fd0d94ec3e563a6e91ef0998703676e358c36b0f977ab1941d2961ff1?rawHex=1
+GET /test/v2/tx/<redacted-txid>?rawHex=1
 Authorization: Bearer <REDACTED>
 ```
 
@@ -270,7 +272,7 @@ Relevant returned fields:
 
 ```json
 {
-  "txid": "3e42ae0fd0d94ec3e563a6e91ef0998703676e358c36b0f977ab1941d2961ff1",
+  "txid": "<redacted-txid>",
   "confirmations": 181,
   "block": {
     "height": 153823,
@@ -283,7 +285,7 @@ Relevant returned fields:
       "value": 10000000000,
       "scriptpubkey": "0014789b8660a8b2c34e4a6bd7efead82990afbcfeca",
       "type": "witness_v0_keyhash",
-      "address": "tb1q0zdcvc9gktp5ujnt6lh74kpfjzhmelk2ne3ell"
+      "address": "<redacted-index-4-address>"
     }
   ]
 }
@@ -298,7 +300,7 @@ POST /test/v2/wallet
 Authorization: Bearer <REDACTED>
 Content-Type: application/x-www-form-urlencoded
 
-active=tb1q0zdcvc9gktp5ujnt6lh74kpfjzhmelk2ne3ell
+active=<redacted-index-4-address>
 ```
 
 The relevant response was:
@@ -308,7 +310,7 @@ The relevant response was:
   "wallet": { "final_balance": 0 },
   "addresses": [
     {
-      "address": "tb1q0zdcvc9gktp5ujnt6lh74kpfjzhmelk2ne3ell",
+      "address": "<redacted-index-4-address>",
       "final_balance": 0,
       "n_tx": 0
     }
@@ -325,7 +327,7 @@ The response's `info.latest_block.height` was `154003`. This was not simply a ba
 The public explorer endpoint below returned `{"spent":false}` during the investigation:
 
 ```text
-https://mempool.space/testnet4/api/tx/3e42ae0fd0d94ec3e563a6e91ef0998703676e358c36b0f977ab1941d2961ff1/outspend/0
+https://mempool.space/testnet4/api/tx/<redacted-txid>/outspend/0
 ```
 
 That is explorer evidence, not an independently validated chain proof. Even if the output were later spent, complete address history should not describe this address as having no transactions.
@@ -337,7 +339,7 @@ That is explorer evidence, not an independently validated chain proof. Even if t
 The operator subsequently executed the documented request:
 
 ```http
-GET /test/v2/txout/3e42ae0fd0d94ec3e563a6e91ef0998703676e358c36b0f977ab1941d2961ff1/0
+GET /test/v2/txout/<redacted-txid>/0
 Authorization: Bearer <REDACTED>
 ```
 
@@ -350,7 +352,7 @@ The merchant Dojo returned:
   "value": 100,
   "scriptPubKey": {
     "hex": "0014789b8660a8b2c34e4a6bd7efead82990afbcfeca",
-    "address": "tb1q0zdcvc9gktp5ujnt6lh74kpfjzhmelk2ne3ell",
+    "address": "<redacted-index-4-address>",
     "type": "witness_v0_keyhash"
   },
   "coinbase": false
@@ -362,7 +364,7 @@ This endpoint is documented as querying Bitcoin RPC. Its `value` is in BTC: 100 
 The index-4 payment public key was then derived locally, without signing or broadcasting. Its P2WPKH address was checked against both the saved allocation and the paid address:
 
 ```text
-0274baf230341a5ef0421fc6376336320ff60d97f6ab7292c3d9e29bd4eb730a71
+<redacted-index-4-payment-public-key>
 ```
 
 Only the derived public key and address were printed. The application database was opened read-only. The subsequent diagnostic used `POST /wallet` with `active` set to this public key, rather than to the address. Do not use `pubkey=<key>` as a rescan flag: the documented `pubkey` parameter declares a new entity and can skip historical import.
@@ -385,7 +387,7 @@ POST /test/v2/wallet
 Authorization: Bearer <REDACTED>
 Content-Type: application/x-www-form-urlencoded
 
-active=0274baf230341a5ef0421fc6376336320ff60d97f6ab7292c3d9e29bd4eb730a71
+active=<redacted-index-4-payment-public-key>
 ```
 
 At reported chain height `154057`, the response contained:
@@ -395,22 +397,22 @@ At reported chain height `154057`, the response contained:
   "wallet": { "final_balance": 0 },
   "addresses": [
     {
-      "address": "mrWfh8j86eXLZ67vgsCZyK5G8bCktxnSTt",
+      "address": "<redacted-legacy-variant>",
       "final_balance": 0,
       "n_tx": 0,
-      "pubkey": "0274baf230341a5ef0421fc6376336320ff60d97f6ab7292c3d9e29bd4eb730a71"
+      "pubkey": "<redacted-index-4-payment-public-key>"
     },
     {
-      "address": "tb1q0zdcvc9gktp5ujnt6lh74kpfjzhmelk2ne3ell",
+      "address": "<redacted-index-4-address>",
       "final_balance": 0,
       "n_tx": 0,
-      "pubkey": "0274baf230341a5ef0421fc6376336320ff60d97f6ab7292c3d9e29bd4eb730a71"
+      "pubkey": "<redacted-index-4-payment-public-key>"
     },
     {
-      "address": "2Mw5fGQGiZSq2C3kWSirymqbpfprUBw2LcH",
+      "address": "<redacted-nested-segwit-variant>",
       "final_balance": 0,
       "n_tx": 0,
-      "pubkey": "0274baf230341a5ef0421fc6376336320ff60d97f6ab7292c3d9e29bd4eb730a71"
+      "pubkey": "<redacted-index-4-payment-public-key>"
     }
   ],
   "txs": [],
@@ -531,9 +533,9 @@ A proposed testnet-only reproduction uses the dispenser notification's change ou
 
 | Field | Value |
 | --- | --- |
-| Notification transaction | `ed5e018a36e8b69c13d41e1aec45460aed0e033fbd3638b5e01c776bbc6d6253` |
+| Notification transaction | Testnet4 transaction (ID redacted) |
 | Change output | `vout 2`, 19,218 sats |
-| Change address | `tb1qd52f4eu7jfjmc8vc836mywmzt57l8gd66c5aee` |
+| Change address | Dispenser change address (redacted) |
 
 The reproduction registers this address with `new=` and then queries it using `active=`; both are expected to show no history. A genuine first `active=` lookup of an unused-before address that has history is expected to import it. This changes tracking state on the merchant Dojo and links the dispenser change address to those queries; it was proposed as a testnet diagnostic, not performed as part of this investigation.
 
@@ -598,10 +600,7 @@ These are moving `develop` references, not pinned evidence of the merchant node'
 
 ### Public Transactions
 
-- [Funding transaction](https://mempool.space/testnet4/tx/102d1723619d26f7f0c58d7127544f8240351984d5fc6bcf645de5e1d7d0d8cf)
-- [Notification transaction](https://mempool.space/testnet4/tx/ed5e018a36e8b69c13d41e1aec45460aed0e033fbd3638b5e01c776bbc6d6253)
-- [Index-4 payment](https://mempool.space/testnet4/tx/3e42ae0fd0d94ec3e563a6e91ef0998703676e358c36b0f977ab1941d2961ff1)
-- [Index-1 payment](https://mempool.space/testnet4/tx/210d8fa149dfa0d16280d109eb18785a3a4f2f86036f434bf282e619c5b24651)
+- Funding, notification, and payment transactions were testnet4 transactions; identifiers are redacted from this public report.
 
 ## Status at Handoff
 
