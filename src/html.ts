@@ -55,8 +55,16 @@ button, .button { display: inline-block; font: inherit; font-weight: 600;
 .address { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
   background: var(--code); border-radius: 8px; padding: 0.75rem;
   word-break: break-all; font-size: 1rem; user-select: all; }
-.qr { display: flex; justify-content: center; }
-.qr svg { width: 100%; max-width: 15rem; height: auto; border-radius: 8px; }
+.qr { display: flex; justify-content: center; border-radius: 10px;
+  cursor: pointer; }
+.qr svg { width: 100%; max-width: 15rem; height: auto; border-radius: 8px;
+  transition: transform 0.12s ease, box-shadow 0.12s ease; }
+.qr:hover svg { transform: scale(1.02);
+  box-shadow: 0 0 0 3px var(--accent); }
+.qr:focus-visible { outline: none; }
+.qr:focus-visible svg { box-shadow: 0 0 0 3px var(--accent); }
+.center { text-align: center; }
+@media (prefers-reduced-motion: reduce) { .qr svg { transition: none; } }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 1rem;
   margin: 0; }
 dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }

@@ -57,7 +57,11 @@ function result(config: Config, allocation: Allocation): string {
   return page("Your payment address", `${header(config)}
 <div class="card stack">
   <h2>Send your payment to this address</h2>
-  <div class="qr">${qrSvg(uri, "QR code for the payment address")}</div>
+  <a class="qr" href="${escape(uri)}"
+    title="Open in your Bitcoin wallet">${
+  qrSvg(uri, "Payment QR code. Select to open your Bitcoin wallet.")}</a>
+  <p class="muted center">Tap or click the code to open your wallet, or
+  scan it from another device.</p>
   <div class="address">${escape(allocation.address)}</div>
   <dl>${amount}<dt>Issued</dt><dd>${escape(formatTime(allocation.created_at))}</dd></dl>
   <a class="button" href="${escape(uri)}">Open in wallet</a>
