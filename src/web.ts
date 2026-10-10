@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { Profile, Unavailable, type Config } from "./config.js";
+import {
+  Config, Profile, Unavailable, requireCondition, type NetworkName,
+} from "./config.js";
 import { createWallet, deriveAddress } from "./bitcoin.js";
 import {
   bitcoinUri, escape, formatTime, page, qrSvg, sendHtml,
@@ -16,7 +18,9 @@ const webId = (nonce: string): string => `web_${nonce}`;
 const DEFAULT_NAME = "Pay with Bitcoin";
 
 interface Site {
-  readonly config: Config;
+  readonly network: NetworkName;
+  // Undefined until the operator has started setup.
+  readonly config: Config | undefined;
   readonly profile: Profile | undefined;
 }
 
@@ -26,13 +30,13 @@ function siteTitle(site: Site, title?: string): string {
 }
 
 function header(site: Site, intro = false): string {
-  const { config, profile } = site;
-  const testnet = config.network !== "mainnet";
+  const { network, profile } = site;
+  const testnet = network !== "mainnet";
   const description = intro && profile?.description
     ? `<p class="lead">${escape(profile.description)}</p>`
     : "";
   return `<header><h1>${escape(profile?.name ?? DEFAULT_NAME)}</h1>
-<span class="badge ${testnet ? "warn" : "ok"}">${escape(config.network)}</span>
+<span class="badge ${testnet ? "warn" : "ok"}">${escape(network)}</span>
 </header>${description}${testnet
     ? '<div class="notice">Test network. These coins have no value.</div>'
     : ""}`;
@@ -60,8 +64,11 @@ function form(site: Site): string {
 <p class="muted">Your browser needs no JavaScript for this page.</p>`);
 }
 
-function result(site: Site, allocation: Allocation): string {
-  const { config } = site;
+function result(
+  site: Site,
+  config: Config,
+  allocation: Allocation,
+): string {
   const uri = bitcoinUri(allocation.address, allocation.amount_sats);
   const amount = allocation.amount_sats
     ? `<dt>Amount</dt><dd>${escape(
@@ -124,13 +131,17 @@ export async function handlePublic(
   req: IncomingMessage,
   res: ServerResponse,
   store: Store,
-  config: Config,
+  network: NetworkName,
 ): Promise<boolean> {
   const path = (req.url ?? "").split("?")[0] ?? "";
-  const site: Site = { config, profile: store.get("profile", Profile) };
+  const config = store.get("config", Config);
+  const site: Site = {
+    network, config, profile: store.get("profile", Profile),
+  };
 
   if (req.method === "GET" && path === "/") {
     try {
+      requireCondition(config, "Not set up");
       requireApproval(store, config);
     } catch {
       sendHtml(res, 503, message(site, "Not accepting payments yet",
@@ -148,6 +159,7 @@ export async function handlePublic(
 
   if (req.method === "POST" && path === "/pay") {
     try {
+      if (!config) throw new Unavailable("Not set up");
       requireApproval(store, config);
       const body = await readForm(req);
       const nonce = body.get("nonce") ?? "";
@@ -175,11 +187,11 @@ export async function handlePublic(
   const view = /^\/pay\/([0-9a-f]{32})$/.exec(path);
   if (req.method === "GET" && view?.[1]) {
     const allocation = store.findAllocation(webId(view[1]));
-    if (!allocation) {
+    if (!allocation || !config) {
       sendHtml(res, 404, message(site, "Address not found",
         "This payment link is not valid."));
     } else {
-      sendHtml(res, 200, result(site, allocation));
+      sendHtml(res, 200, result(site, config, allocation));
     }
     return true;
   }

@@ -2,17 +2,17 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
 import { z } from "zod";
 import {
-  Approval, Pairing, Pending, Unavailable, requireCondition, type Config,
+  Approval, Config, Pending, Unavailable, requireCondition,
+  type NetworkName,
 } from "./config.js";
 import {
   createWallet, deriveAddress, identityStatement, verifyIdentity,
 } from "./bitcoin.js";
 import { requireApproval } from "./approval.js";
-import { serveAdmin, type SyncState } from "./admin.js";
+import { serveAdmin } from "./admin.js";
 import { bitcoinUri } from "./html.js";
 import { Store } from "./store.js";
-import { syncDojo } from "./registrar.js";
-import { connectDojo } from "./tor.js";
+import { Monitor } from "./monitor.js";
 import { handlePublic } from "./web.js";
 
 const SYNC_INTERVAL_MS = 60000;
@@ -36,13 +36,18 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 
-export function serve(store: Store, config: Config): void {
+export function serve(store: Store, network: NetworkName): void {
   const port = z.coerce.number().int().min(1).max(65535)
     .parse(process.env.NYM_PORT ?? "8088");
   const host = process.env.NYM_LISTEN_HOST ?? "127.0.0.1";
   requireCondition(
     host === "127.0.0.1" || host === "0.0.0.0",
     "Unsupported listen host",
+  );
+  const stored = store.get("config", Config);
+  requireCondition(
+    !stored || stored.network === network,
+    "Stored network mismatch",
   );
 
   const server = createServer(async (req, res) => {
@@ -58,17 +63,21 @@ export function serve(store: Store, config: Config): void {
     };
 
     try {
+      // Read per request: setup in the dashboard creates it while serving.
+      const config = store.get("config", Config);
+
       if (req.method === "GET" && req.url === "/health") {
         let ready = false;
         try {
+          requireCondition(config, "Not set up");
           requireApproval(store, config);
           ready = true;
         } catch {}
         reply(200, {
           application: "Tekiya",
-          network: config.network,
+          network,
           ready,
-          issuing: ready && !store.issuanceBlocker(
+          issuing: ready && config !== undefined && !store.issuanceBlocker(
             index => deriveAddress(config, index),
           ),
         });
@@ -76,6 +85,10 @@ export function serve(store: Store, config: Config): void {
       }
 
       if (req.method === "GET" && req.url === "/identity") {
+        if (!config) {
+          reply(503, { error: "Not set up" });
+          return;
+        }
         const pending = store.get("notification", Pending);
         const approval = store.get("approval", Approval);
         const verified = Boolean(pending && approval &&
@@ -95,13 +108,14 @@ export function serve(store: Store, config: Config): void {
         return;
       }
 
-      if (await handlePublic(req, res, store, config)) return;
+      if (await handlePublic(req, res, store, network)) return;
 
       if (req.method !== "POST" || req.url !== "/v1/payment-requests") {
         reply(404, { error: "Not found" });
         return;
       }
 
+      if (!config) throw new Unavailable("Not set up");
       if (!authorized(req.headers.authorization, config.apiToken)) {
         reply(401, { error: "Unauthorized" });
         return;
@@ -135,34 +149,9 @@ export function serve(store: Store, config: Config): void {
     }
   });
 
-  // Requests never wait on Tor: they are served only from addresses this
-  // loop has already registered.
-  const state: SyncState = {};
-  let syncing = false;
-  const sync = async (): Promise<void> => {
-    if (syncing) return;
-    syncing = true;
-    state.lastAttempt = new Date().toISOString();
-    try {
-      const pairing = store.get("pairing", Pairing);
-      requireCondition(pairing, "No Dojo pairing");
-      const result = await syncDojo(
-        store, config, await connectDojo(pairing, config.network),
-      );
-      if (result.halted) console.error(result.halted);
-      state.lastSuccess = new Date().toISOString();
-      state.lastResult = result;
-      delete state.lastError;
-    } catch (error) {
-      state.lastError = error instanceof Error ? error.message : "unknown error";
-      console.error(`Dojo sync failed: ${state.lastError}`);
-    } finally {
-      syncing = false;
-    }
-  };
-  void sync();
-  const timer = setInterval(() => void sync(), SYNC_INTERVAL_MS);
-  const admin = serveAdmin(store, config, state);
+  const monitor = new Monitor(store, network);
+  monitor.start(SYNC_INTERVAL_MS);
+  const admin = serveAdmin(store, network, monitor);
 
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
@@ -171,12 +160,12 @@ export function serve(store: Store, config: Config): void {
 
   server.listen(port, host, () => {
     console.log(
-      `Tekiya ${config.network.toUpperCase()} development API: ${host}:${port}`,
+      `Tekiya ${network.toUpperCase()} payment service: ${host}:${port}`,
     );
   });
 
   const shutdown = (): void => {
-    clearInterval(timer);
+    monitor.stop();
     admin?.close();
     server.close(() => {
       store.close();

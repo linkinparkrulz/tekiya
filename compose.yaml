@@ -7,8 +7,14 @@ services:
       NYM_TOR_PROXY: socks5h://tor:9050
       NYM_LISTEN_HOST: 0.0.0.0
       NYM_PORT: "8088"
+      # Reached only through the dashboard forwarder below.
+      NYM_ADMIN_HOST: 0.0.0.0
+      NYM_ADMIN_PORT: "8089"
+      NYM_ADMIN_AUTH: none
+      NYM_ONION_HOSTNAME_FILE: /onion/hostname
     volumes:
       - app-data:/data
+      - onion-name:/onion:ro
     networks:
       - private
     read_only: true
@@ -26,9 +32,27 @@ services:
       dockerfile: Tor.Dockerfile
     volumes:
       - tor-data:/var/lib/tor
+      - onion-name:/run/onion
     networks:
       - private
       - outbound
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: deploy
+      dockerfile: Forward.Dockerfile
+    ports:
+      # Host loopback only. From another machine, use an SSH tunnel.
+      - "127.0.0.1:8089:8089"
+    networks:
+      - private
+      - dashboard
+    read_only: true
     cap_drop:
       - ALL
     security_opt:
@@ -39,7 +63,9 @@ networks:
   private:
     internal: true
   outbound: {}
+  dashboard: {}
 
 volumes:
   app-data: {}
   tor-data: {}
+  onion-name: {}

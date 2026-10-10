@@ -44,9 +44,24 @@ a { color: var(--accent); }
   background: var(--surface); border-radius: 0 8px 8px 0; margin-bottom: 1rem; }
 .notice.bad { border-color: var(--bad); }
 label { display: block; font-weight: 600; margin-bottom: 0.35rem; }
-input[type=text] { width: 100%; font: inherit; padding: 0.6rem 0.75rem;
-  border: 1px solid var(--line); border-radius: 8px;
+input[type=text], input[type=number], textarea { width: 100%; font: inherit;
+  padding: 0.6rem 0.75rem; border: 1px solid var(--line); border-radius: 8px;
   background: var(--bg); color: var(--text); }
+textarea { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  font-size: 0.85rem; min-height: 7rem; resize: vertical; }
+textarea[readonly] { background: var(--code); }
+.hint { color: var(--muted); font-size: 0.85rem; margin-top: 0.35rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+button.secondary, .button.secondary { background: transparent;
+  color: var(--accent); border: 1px solid var(--line); }
+form.inline { display: inline; }
+ol.steps li.current { font-weight: 600; }
+ol.steps li.current::before { border-color: var(--accent);
+  box-shadow: inset 0 0 0 2px var(--surface), inset 0 0 0 8px var(--accent); }
+.layout { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+@media (min-width: 52rem) {
+  .layout { grid-template-columns: 15rem 1fr; align-items: start; }
+}
 button, .button { display: inline-block; font: inherit; font-weight: 600;
   padding: 0.65rem 1.1rem; border-radius: 8px; border: 0; cursor: pointer;
   background: var(--accent); color: var(--accent-text); text-decoration: none; }
@@ -80,8 +95,9 @@ th { color: var(--muted); font-weight: 600; }
 .nowrap { white-space: nowrap; }
 ol.steps { list-style: none; padding: 0; margin: 0; }
 ol.steps li { display: flex; gap: 0.6rem; padding: 0.3rem 0; }
-ol.steps li::before { content: "○"; color: var(--muted); }
-ol.steps li.done::before { content: "●"; color: var(--ok); }
+ol.steps li::before { content: ""; flex: none; width: 0.7rem; height: 0.7rem;
+  margin-top: 0.42rem; border-radius: 50%; border: 2px solid var(--line); }
+ol.steps li.done::before { background: var(--ok); border-color: var(--ok); }
 `;
 
 const STYLE_HASH = createHash("sha256").update(CSS).digest("base64");

@@ -2,20 +2,19 @@ import {
   chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { randomBytes } from "node:crypto";
-import { Transaction } from "bitcoinjs-lib";
-import { z } from "zod";
 import {
-  Approval, Config, NetworkName, Pairing, Pending, Profile,
-  onionUrl, requireCondition,
+  Approval, Config, NetworkName, Pending, Profile, requireCondition,
 } from "./config.js";
 import {
-  buildNotification, createWallet, deriveAddress,
-  identityStatement, receiver, reconstruct, verifyIdentity,
+  createWallet, deriveAddress, identityStatement,
 } from "./bitcoin.js";
 import { Store } from "./store.js";
 import { syncDojo } from "./registrar.js";
-import { connectDojo, DIRECTORY, torJson } from "./tor.js";
+import {
+  approve, broadcastNotification, confirmedNotification, connectPaired,
+  initialize, issueTestAddress, pairDojo, parsePairing, prepareNotification,
+} from "./setup.js";
+import { DIRECTORY, torJson } from "./tor.js";
 import { serve } from "./server.js";
 
 process.umask(0o077);
@@ -31,11 +30,6 @@ function argument(args: string[], index: number, usage: string): string {
   requireCondition(value, usage);
   return value;
 }
-
-const ObservedTransaction = z.object({
-  hex: z.string().max(800000).regex(/^(?:[0-9a-fA-F]{2})+$/),
-  confirmations: z.number().int().positive(),
-});
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
@@ -63,27 +57,18 @@ async function main(): Promise<void> {
   let serving = false;
 
   try {
-    if (command === "init") {
-      requireCondition(
-        !store.get("config", Config),
-        "Installation already initialized; replacement refused",
-      );
-      const merchantCode = argument(
-        args, 0, "Usage: init MERCHANT_PAYMENT_CODE ONION_ORIGIN",
-      );
-      const onion = onionUrl(argument(
-        args, 1, "Usage: init MERCHANT_PAYMENT_CODE ONION_ORIGIN",
-      ), true).origin;
-      receiver(merchantCode, network);
+    if (command === "serve") {
+      // Starts before setup: the operator dashboard performs it.
+      serve(store, network);
+      serving = true;
+      return;
+    }
 
-      const config: Config = {
-        network,
-        merchantCode,
-        onion,
-        seedHex: randomBytes(64).toString("hex"),
-        apiToken: randomBytes(32).toString("hex"),
-      };
-      store.insert("config", config);
+    if (command === "init") {
+      const usage = "Usage: init MERCHANT_PAYMENT_CODE ONION_ORIGIN";
+      initialize(
+        store, network, argument(args, 0, usage), argument(args, 1, usage),
+      );
       print(`Initialized ${network}. Back up private state before funding.`);
       return;
     }
@@ -92,30 +77,10 @@ async function main(): Promise<void> {
     requireCondition(config, "Initialize this network first");
     requireCondition(config.network === network, "Stored network mismatch");
 
-    const getPairing = (): Pairing => {
-      const pairing = store.get("pairing", Pairing);
-      requireCondition(pairing, "Import a Dojo pairing file first");
-      return pairing;
-    };
-
     const getPending = (): Pending => {
       const pending = store.get("notification", Pending);
       requireCondition(pending, "Prepare a notification first");
       return pending;
-    };
-
-    const confirmedNotification = async () => {
-      const pending = getPending();
-      reconstruct(config, pending);
-      const api = await connectDojo(getPairing(), network);
-      const observed = ObservedTransaction.parse(
-        await api(`tx/${pending.txid}?rawHex=1`),
-      );
-      requireCondition(
-        Transaction.fromHex(observed.hex).getId() === pending.txid,
-        "Backend returned the wrong notification transaction",
-      );
-      return { pending, api };
     };
 
     switch (command) {
@@ -143,12 +108,8 @@ async function main(): Promise<void> {
 
       case "pair": {
         const filename = argument(args, 0, "Usage: pair PRIVATE_PAIRING_FILE");
-        const pairing = Pairing.parse(
-          JSON.parse(readFileSync(filename, "utf8")) as unknown,
-        );
-        const api = await connectDojo(pairing, network);
-        const replaced = Boolean(store.get("pairing", Pairing));
-        store.replacePairing(pairing);
+        const pairing = parsePairing(readFileSync(filename, "utf8"), network);
+        const { api, replaced } = await pairDojo(store, config, pairing);
         print("Dojo login succeeded; the configured network label matches.");
         print("Backend chain identity has not been independently proven.");
         print("The merchant wallet is assumed to use this same Dojo.");
@@ -169,11 +130,9 @@ async function main(): Promise<void> {
         break;
       }
 
-      case "sync": {
-        const api = await connectDojo(getPairing(), network);
-        print(await syncDojo(store, config, api));
+      case "sync":
+        print(await syncDojo(store, config, await connectPaired(store, config)));
         break;
-      }
 
       case "status": {
         const blocker = store.issuanceBlocker(
@@ -223,31 +182,13 @@ async function main(): Promise<void> {
       }
 
       case "prepare": {
-        requireCondition(
-          !store.get("notification", Pending),
-          "Notification already exists; refusing a second setup transaction",
+        const usage = "Usage: prepare FUNDING_TXID VOUT FEE_SATS";
+        const pending = await prepareNotification(
+          store, config, await connectPaired(store, config),
+          argument(args, 0, usage),
+          Number(argument(args, 1, usage)),
+          Number(argument(args, 2, usage)),
         );
-        const txid = z.string().regex(/^[0-9a-f]{64}$/).parse(
-          argument(args, 0, "Usage: prepare FUNDING_TXID VOUT FEE_SATS"),
-        );
-        const vout = Number(argument(
-          args, 1, "Usage: prepare FUNDING_TXID VOUT FEE_SATS",
-        ));
-        const feeSats = Number(argument(
-          args, 2, "Usage: prepare FUNDING_TXID VOUT FEE_SATS",
-        ));
-        const api = await connectDojo(getPairing(), network);
-        const previous = ObservedTransaction.parse(
-          await api(`tx/${txid}?rawHex=1`),
-        );
-        requireCondition(
-          Transaction.fromHex(previous.hex).getId() === txid,
-          "Backend returned the wrong funding transaction",
-        );
-        const pending = buildNotification(
-          config, previous.hex, vout, feeSats,
-        );
-        store.insert("notification", pending);
         print({
           txid: pending.txid,
           recipient: pending.recipient,
@@ -260,31 +201,20 @@ async function main(): Promise<void> {
       }
 
       case "broadcast": {
-        const pending = reconstruct(config, getPending());
         requireCondition(
-          args[0] === pending.txid,
+          args[0] === getPending().txid,
           "Usage: broadcast EXACT_PREPARED_NOTIFICATION_TXID",
         );
-        const api = await connectDojo(getPairing(), network);
-        const response = z.object({
-          status: z.literal("ok"),
-          data: z.string(),
-        }).parse(await api("pushtx/", { tx: pending.hex }));
-        requireCondition(
-          response.data === pending.txid,
-          "Backend acknowledged an unexpected transaction ID",
+        const txid = await broadcastNotification(
+          store, config, await connectPaired(store, config),
         );
-        print({ txid: pending.txid, broadcastAcknowledged: true });
+        print({ txid, broadcastAcknowledged: true });
         break;
       }
 
       case "test-address": {
-        const { api } = await confirmedNotification();
-        await syncDojo(store, config, api);
-        // Reserved locally so the compatibility test cannot cause reuse.
-        const allocation = store.allocate(
-          "setup_compatibility_test", 0,
-          index => deriveAddress(config, index),
+        const allocation = await issueTestAddress(
+          store, config, await connectPaired(store, config),
         );
         print({
           ...allocation,
@@ -299,33 +229,21 @@ async function main(): Promise<void> {
         break;
 
       case "approve": {
-        const { pending } = await confirmedNotification();
-        const filename = argument(args, 0, "Usage: approve SIGNATURE_FILE");
-        const signature = readFileSync(filename, "utf8").trim();
-        requireCondition(
-          verifyIdentity(config, pending, signature),
-          "Merchant signature does not match the exact approval statement",
+        const pending = await confirmedNotification(
+          store, config, await connectPaired(store, config),
         );
-        store.insert("approval", {
-          txid: pending.txid,
-          signature,
-          createdAt: new Date().toISOString(),
-        });
+        const filename = argument(args, 0, "Usage: approve SIGNATURE_FILE");
+        approve(store, config, pending, readFileSync(filename, "utf8"));
         print("Merchant approval accepted.");
         print("Confirmation status is trusted Dojo data, not an SPV proof.");
         break;
       }
 
-      case "serve":
-        serve(store, config);
-        serving = true;
-        break;
-
       default:
         throw new Error(
-          "Commands: init, info, token, directory, pair, sync, status, " +
-          "profile, resume-issuance, prepare, broadcast, test-address, statement, " +
-          "approve, serve",
+          "Commands: serve (setup runs in its dashboard), init, info, token, " +
+          "directory, pair, sync, status, profile, resume-issuance, prepare, " +
+          "broadcast, test-address, statement, approve",
         );
     }
   } finally {

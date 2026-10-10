@@ -4,6 +4,54 @@ Standalone TypeScript BIP47 address-dispenser development build.
 
 Not audited. Not wallet-interoperability tested. Start with testnet4.
 
+## Quick start
+
+With Docker:
+
+    docker compose up -d --build
+
+Open http://127.0.0.1:8089 on the same machine (from elsewhere, tunnel it:
+`ssh -L 8089:127.0.0.1:8089 your-server`) and follow the setup. The
+dashboard walks through every step:
+
+1. Paste your merchant wallet's payment code. The onion address is
+   detected automatically.
+2. Paste the pairing of the Dojo your merchant wallet uses.
+3. Send about 20,000 sats to the address shown. Funding is detected.
+4. Create and broadcast the one-time notification transaction.
+5. Pay a test address and check that your merchant wallet receives it.
+6. Sign the approval text in your merchant wallet and paste the signature.
+
+Without Docker: `npm ci && npm run build`, merge
+`deploy/torrc.host.example` into your Tor configuration, then run
+`npm start` (or install `deploy/nymdispenser.service`). The dashboard asks
+for the onion address, which Tor writes to
+`/var/lib/tor/nymdispenser/hostname`.
+
+Your payment page is then live on the onion address. Name it in the
+dashboard. Set `NYM_NETWORK=mainnet` only after testing on testnet4.
+
+## Dashboard access
+
+The dashboard never appears on the onion service. `NYM_ADMIN_AUTH` sets
+who may reach it:
+
+- `loopback` (default): `127.0.0.1` only, no password.
+- `password`: HTTP basic auth with `NYM_ADMIN_PASSWORD` (12+ characters),
+  for a private network. Set `NYM_ADMIN_HOST=0.0.0.0`.
+- `proxy`: behind an authenticating reverse proxy, such as Umbrel's app
+  proxy. Set `NYM_ADMIN_HOST=0.0.0.0`.
+- `none`: no auth beyond the network; only behind a loopback-only
+  forwarder, as in the bundled Compose file.
+
+In `loopback` and `none` modes the Host header must be
+`127.0.0.1:PORT` or `localhost:PORT`; add others with `NYM_ADMIN_HOSTS`.
+Forms only accept same-origin submissions.
+
+On Umbrel, the app would run with `NYM_ADMIN_AUTH=proxy`, its app proxy
+on the internal network pointing at port 8089, and its own Tor container
+for the public onion, as in `compose.yaml`.
+
 ## Build
 
 Requires Node 24+, npm, curl, and Tor.
@@ -30,7 +78,7 @@ The paired Dojo is assumed to be the one the merchant wallet uses.
 Before an address can be issued, it is registered with that Dojo through
 a first `active=` lookup of its payment public key. Dojo then tracks it,
 and a later `new=` declaration by the receiving wallet (as Ashigaru's
-Resync Paynym sends) cannot suppress its history. `pair` registers the
+Resync Paynym sends) cannot suppress its history. Pairing registers the
 first addresses immediately. `serve` keeps three addresses registered
 ahead of the next allocation and rechecks every minute.
 
@@ -43,7 +91,7 @@ History on an address that was never issued indicates a cloned
 installation or a stale backup. Issuance then halts until the cause is
 investigated and `resume-issuance --recovery-reviewed` is run.
 
-Running `pair` again replaces the pairing and re-registers every address
+Pairing again (dashboard: Change Dojo) replaces the pairing and re-registers every address
 with the new Dojo. Re-pair Tekiya first, and move the merchant wallet only
 after a successful sync, so the new Dojo imports existing payments before
 the wallet can declare those addresses new.
@@ -52,7 +100,8 @@ Registration links address issuance to the paired Dojo's operator.
 
 ## Commands
 
-Run commands using npm run cli -- COMMAND.
+The dashboard covers setup. The same steps exist as commands, run with
+npm run cli -- COMMAND.
 
 - init MERCHANT_CODE ONION_ORIGIN
 - info
@@ -68,7 +117,7 @@ Run commands using npm run cli -- COMMAND.
 - test-address
 - statement
 - approve SIGNATURE_FILE
-- serve
+- serve (starts the payment page and the dashboard, even before setup)
 
 ## Web pages
 
@@ -78,7 +127,7 @@ a QR code and a `bitcoin:` link at a private `/pay/...` URL. Pages use no
 JavaScript or external resources and work in Tor Browser's Safest mode.
 Resubmitting the form returns the same address.
 
-Set the page's name and optional description with
+Set the page's name and optional description in the dashboard or with
 `profile "Corner Café" "Support the community garden."` (name up to 80
 characters, description up to 280, plain text). Changes apply on the next
 page load; `profile --clear` restores the default "Pay with Bitcoin".
@@ -86,11 +135,10 @@ page load; `profile --clear` restores the default "Pay with Bitcoin".
 The page is unauthenticated: anyone can use up the staging addresses or
 trigger the lookahead pause. No abuse protection is included yet.
 
-A read-only operator dashboard listens on `127.0.0.1:8089` (set
-`NYM_ADMIN_PORT`; `0` disables it). It shows setup progress, issuance
-status, Dojo sync results, issued addresses and confirmed payments. It is
-never published on the onion service. In the container deployment it is
-reachable only inside the app container; use `status` there instead.
+The operator dashboard listens on port 8089 (`NYM_ADMIN_PORT`; `0`
+disables it). After setup it shows issuance status, Dojo checks, issued
+addresses and confirmed payments, and lets you name the page, change
+Dojo, resume a halted installation and see the integration API token.
 
 ## Limitations
 
@@ -102,7 +150,8 @@ No Auth47 login, PayNym profile caching,
 automatic directory selection, customer-payment monitoring, funding-wallet
 sweep command, or fee-bump command is included.
 
-Funding uses one explicitly identified output. Fees are entered manually.
+Funding uses one confirmed output of at most 1,000,000 sats. The fee is
+suggested from the Dojo's estimate and can be changed.
 
 Do not use the merchant payment code or dispenser code as a Bitcoin
 payment address. Customer payments go to the derived destination address.
@@ -113,7 +162,8 @@ The database contains the plaintext dispenser seed, backend credentials,
 API token, identity approval, and address-allocation history.
 
 Stop all application processes before copying the full data directory.
-Back up the onion identity separately. Store backups securely.
+Back up the onion identity separately (Compose: the `tor-data` volume).
+Store backups securely.
 
 Never run cloned copies of the same state. Never resume issuance from a
 stale backup without recovery analysis: previously displayed unpaid
