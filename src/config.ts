@@ -97,6 +97,17 @@ export const Pending = z.object({
 
 export type Pending = z.infer<typeof Pending>;
 
+// Public page text. Plain text only; it is escaped when rendered.
+const PlainText = (max: number) => z.string().trim().max(max)
+  .regex(/^[^\p{Cc}]*$/u, "Control characters are not allowed");
+
+export const Profile = z.object({
+  name: PlainText(80).min(1, "Name must not be empty"),
+  description: PlainText(280).default(""),
+});
+
+export type Profile = z.infer<typeof Profile>;
+
 export const Approval = z.object({
   txid: z.string(),
   signature: z.string(),

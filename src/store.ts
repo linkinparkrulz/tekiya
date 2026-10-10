@@ -91,6 +91,19 @@ export class Store {
     }
   }
 
+  // Only for editable, non-security settings such as the public profile.
+  replace(key: string, value: unknown): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)",
+    ).run(key, JSON.stringify(value));
+  }
+
+  remove(key: string): boolean {
+    return this.db.prepare(
+      "DELETE FROM settings WHERE key = ?",
+    ).run(key).changes > 0;
+  }
+
   register(index: number, address: string): void {
     this.db.prepare(
       "INSERT OR IGNORE INTO registrations VALUES (?, ?, ?)",

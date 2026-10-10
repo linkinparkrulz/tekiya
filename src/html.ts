@@ -34,6 +34,7 @@ a { color: var(--accent); }
 .card { background: var(--surface); border: 1px solid var(--line);
   border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; }
 .muted { color: var(--muted); font-size: 0.9rem; }
+.lead { color: var(--muted); margin: -0.75rem 0 1.25rem; }
 .badge { display: inline-block; font-size: 0.75rem; font-weight: 600;
   padding: 0.15rem 0.55rem; border-radius: 999px; border: 1px solid;
   text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }

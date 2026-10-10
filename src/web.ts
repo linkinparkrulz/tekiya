@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { Unavailable, type Config } from "./config.js";
+import { Profile, Unavailable, type Config } from "./config.js";
 import { createWallet, deriveAddress } from "./bitcoin.js";
 import {
   bitcoinUri, escape, formatTime, page, qrSvg, sendHtml,
@@ -13,23 +13,39 @@ import { Store, type Allocation } from "./store.js";
 const NONCE = /^[0-9a-f]{32}$/;
 const webId = (nonce: string): string => `web_${nonce}`;
 
-function header(config: Config): string {
+const DEFAULT_NAME = "Pay with Bitcoin";
+
+interface Site {
+  readonly config: Config;
+  readonly profile: Profile | undefined;
+}
+
+function siteTitle(site: Site, title?: string): string {
+  const name = site.profile?.name ?? DEFAULT_NAME;
+  return title ? `${title} · ${name}` : name;
+}
+
+function header(site: Site, intro = false): string {
+  const { config, profile } = site;
   const testnet = config.network !== "mainnet";
-  return `<header><h1>Pay with Bitcoin</h1>
+  const description = intro && profile?.description
+    ? `<p class="lead">${escape(profile.description)}</p>`
+    : "";
+  return `<header><h1>${escape(profile?.name ?? DEFAULT_NAME)}</h1>
 <span class="badge ${testnet ? "warn" : "ok"}">${escape(config.network)}</span>
-</header>${testnet
+</header>${description}${testnet
     ? '<div class="notice">Test network. These coins have no value.</div>'
     : ""}`;
 }
 
-function message(config: Config, title: string, text: string): string {
-  return page(title, `${header(config)}
+function message(site: Site, title: string, text: string): string {
+  return page(siteTitle(site, title), `${header(site)}
 <div class="card"><h2>${escape(title)}</h2><p>${escape(text)}</p>
 <a class="button" href="/">Back</a></div>`);
 }
 
-function form(config: Config): string {
-  return page("Pay with Bitcoin", `${header(config)}
+function form(site: Site): string {
+  return page(siteTitle(site), `${header(site, true)}
 <form class="card stack" method="post" action="/pay">
   <p>Get a fresh address for one payment. It is used for you alone and
   never handed out again.</p>
@@ -44,7 +60,8 @@ function form(config: Config): string {
 <p class="muted">Your browser needs no JavaScript for this page.</p>`);
 }
 
-function result(config: Config, allocation: Allocation): string {
+function result(site: Site, allocation: Allocation): string {
+  const { config } = site;
   const uri = bitcoinUri(allocation.address, allocation.amount_sats);
   const amount = allocation.amount_sats
     ? `<dt>Amount</dt><dd>${escape(
@@ -54,7 +71,7 @@ function result(config: Config, allocation: Allocation): string {
   const dispenser = createWallet(config.seedHex, config.network)
     .sender.toBase58();
 
-  return page("Your payment address", `${header(config)}
+  return page(siteTitle(site, "Your payment address"), `${header(site)}
 <div class="card stack">
   <h2>Send your payment to this address</h2>
   <a class="qr" href="${escape(uri)}"
@@ -110,21 +127,22 @@ export async function handlePublic(
   config: Config,
 ): Promise<boolean> {
   const path = (req.url ?? "").split("?")[0] ?? "";
+  const site: Site = { config, profile: store.get("profile", Profile) };
 
   if (req.method === "GET" && path === "/") {
     try {
       requireApproval(store, config);
     } catch {
-      sendHtml(res, 503, message(config, "Not accepting payments yet",
+      sendHtml(res, 503, message(site, "Not accepting payments yet",
         "This payment service has not been approved by the merchant."));
       return true;
     }
     if (store.issuanceBlocker(index => deriveAddress(config, index))) {
-      sendHtml(res, 503, message(config, "Temporarily unavailable",
+      sendHtml(res, 503, message(site, "Temporarily unavailable",
         "No payment address can be issued right now. Please try later."));
       return true;
     }
-    sendHtml(res, 200, form(config));
+    sendHtml(res, 200, form(site));
     return true;
   }
 
@@ -144,10 +162,10 @@ export async function handlePublic(
       res.end();
     } catch (error) {
       if (error instanceof Unavailable) {
-        sendHtml(res, 503, message(config, "Temporarily unavailable",
+        sendHtml(res, 503, message(site, "Temporarily unavailable",
           "No payment address can be issued right now. Please try later."));
       } else {
-        sendHtml(res, 400, message(config, "Request not accepted",
+        sendHtml(res, 400, message(site, "Request not accepted",
           error instanceof Error ? error.message : "Request failed"));
       }
     }
@@ -158,10 +176,10 @@ export async function handlePublic(
   if (req.method === "GET" && view?.[1]) {
     const allocation = store.findAllocation(webId(view[1]));
     if (!allocation) {
-      sendHtml(res, 404, message(config, "Address not found",
+      sendHtml(res, 404, message(site, "Address not found",
         "This payment link is not valid."));
     } else {
-      sendHtml(res, 200, result(config, allocation));
+      sendHtml(res, 200, result(site, allocation));
     }
     return true;
   }

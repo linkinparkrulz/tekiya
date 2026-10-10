@@ -6,7 +6,7 @@ import { randomBytes } from "node:crypto";
 import { Transaction } from "bitcoinjs-lib";
 import { z } from "zod";
 import {
-  Approval, Config, NetworkName, Pairing, Pending,
+  Approval, Config, NetworkName, Pairing, Pending, Profile,
   onionUrl, requireCondition,
 } from "./config.js";
 import {
@@ -195,6 +195,22 @@ async function main(): Promise<void> {
         break;
       }
 
+      case "profile": {
+        if (args[0] === "--clear") {
+          store.remove("profile");
+          print("Profile cleared; the page shows the default title.");
+          break;
+        }
+        if (args.length > 0) {
+          store.replace("profile", Profile.parse({
+            name: args[0],
+            description: args[1] ?? "",
+          }));
+        }
+        print(store.get("profile", Profile) ?? "No profile set.");
+        break;
+      }
+
       case "resume-issuance": {
         requireCondition(
           args[0] === "--recovery-reviewed",
@@ -308,7 +324,7 @@ async function main(): Promise<void> {
       default:
         throw new Error(
           "Commands: init, info, token, directory, pair, sync, status, " +
-          "resume-issuance, prepare, broadcast, test-address, statement, " +
+          "profile, resume-issuance, prepare, broadcast, test-address, statement, " +
           "approve, serve",
         );
     }

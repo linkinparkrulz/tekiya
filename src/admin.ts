@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
 import { z } from "zod";
 import {
-  ISSUANCE_LIMIT, Pairing, Pending, RECEIVER_LOOKAHEAD, requireCondition,
+  ISSUANCE_LIMIT, Pairing, Pending, Profile, RECEIVER_LOOKAHEAD,
+  requireCondition,
   type Config,
 } from "./config.js";
 import { createWallet, deriveAddress } from "./bitcoin.js";
@@ -131,6 +132,8 @@ ${sync.lastResult ? `<dt>Registered</dt><dd>${
 </div>
 <section class="card"><h2>Addresses</h2>${table}</section>
 <details class="card"><summary>Identity</summary><dl>
+<dt>Page name</dt><dd>${escape(
+    store.get("profile", Profile)?.name ?? "default (run profile to set)")}</dd>
 <dt>Network</dt><dd>${escape(config.network)}</dd>
 <dt>Onion</dt><dd class="mono">${escape(config.onion)}</dd>
 <dt>Merchant</dt><dd class="mono">${escape(config.merchantCode)}</dd>

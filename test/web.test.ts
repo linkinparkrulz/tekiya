@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { CSP, escape, page, qrSvg } from "../src/html.js";
 import { parseBtcAmount } from "../src/web.js";
+import { Profile } from "../src/config.js";
 
 test("BTC amounts convert to exact satoshis", () => {
   assert.equal(parseBtcAmount(""), 0);
@@ -35,4 +36,15 @@ test("QR codes are self-contained SVG", () => {
   assert.match(svg, /^<svg [^>]*viewBox="0 0 \d+ \d+"/);
   assert.ok(svg.includes('aria-label="QR &lt;label&gt;"'));
   assert.ok(!/script|href|style/.test(svg));
+});
+
+test("profile text is plain, bounded and trimmed", () => {
+  assert.deepEqual(
+    Profile.parse({ name: "  Corner Café  " }),
+    { name: "Corner Café", description: "" },
+  );
+  assert.throws(() => Profile.parse({ name: "  " }));
+  assert.throws(() => Profile.parse({ name: "x".repeat(81) }));
+  assert.throws(() => Profile.parse({ name: "a", description: "x".repeat(281) }));
+  assert.throws(() => Profile.parse({ name: "line\nbreak" }));
 });

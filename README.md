@@ -61,6 +61,7 @@ Run commands using npm run cli -- COMMAND.
 - pair PRIVATE_PAIRING_FILE
 - sync
 - status
+- profile NAME [DESCRIPTION] (or profile --clear)
 - resume-issuance --recovery-reviewed
 - prepare FUNDING_TXID VOUT FEE_SATS
 - broadcast PREPARED_NOTIFICATION_TXID
@@ -76,6 +77,11 @@ request a fresh address, optionally with an amount, and get the address,
 a QR code and a `bitcoin:` link at a private `/pay/...` URL. Pages use no
 JavaScript or external resources and work in Tor Browser's Safest mode.
 Resubmitting the form returns the same address.
+
+Set the page's name and optional description with
+`profile "Corner Café" "Support the community garden."` (name up to 80
+characters, description up to 280, plain text). Changes apply on the next
+page load; `profile --clear` restores the default "Pay with Bitcoin".
 
 The page is unauthenticated: anyone can use up the staging addresses or
 trigger the lookahead pause. No abuse protection is included yet.
