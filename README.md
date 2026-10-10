@@ -69,13 +69,30 @@ Run commands using npm run cli -- COMMAND.
 - approve SIGNATURE_FILE
 - serve
 
+## Web pages
+
+`serve` publishes a payment page at `/` on the onion service. Visitors
+request a fresh address, optionally with an amount, and get the address,
+a QR code and a `bitcoin:` link at a private `/pay/...` URL. Pages use no
+JavaScript or external resources and work in Tor Browser's Safest mode.
+Resubmitting the form returns the same address.
+
+The page is unauthenticated: anyone can use up the staging addresses or
+trigger the lookahead pause. No abuse protection is included yet.
+
+A read-only operator dashboard listens on `127.0.0.1:8089` (set
+`NYM_ADMIN_PORT`; `0` disables it). It shows setup progress, issuance
+status, Dojo sync results, issued addresses and confirmed payments. It is
+never published on the onion service. In the container deployment it is
+reachable only inside the app container; use `status` there instead.
+
 ## Limitations
 
 Only five addresses may be allocated. The local compatibility test reserves
 one of those addresses. This bounds testing but does not configure the
 receiving wallet's lookahead.
 
-No public donation frontend, Auth47 login, PayNym profile caching,
+No Auth47 login, PayNym profile caching,
 automatic directory selection, customer-payment monitoring, funding-wallet
 sweep command, or fee-bump command is included.
 

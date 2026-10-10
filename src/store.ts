@@ -171,6 +171,13 @@ export class Store {
     return undefined;
   }
 
+  findAllocation(id: string): Allocation | undefined {
+    const row = this.db.prepare(
+      "SELECT * FROM allocations WHERE request_id = ?",
+    ).get(id);
+    return row ? Allocation.parse(row) : undefined;
+  }
+
   allocate(
     id: string,
     amountSats: number,

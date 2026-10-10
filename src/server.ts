@@ -7,23 +7,15 @@ import {
 import {
   createWallet, deriveAddress, identityStatement, verifyIdentity,
 } from "./bitcoin.js";
+import { requireApproval } from "./approval.js";
+import { serveAdmin, type SyncState } from "./admin.js";
+import { bitcoinUri } from "./html.js";
 import { Store } from "./store.js";
 import { syncDojo } from "./registrar.js";
 import { connectDojo } from "./tor.js";
+import { handlePublic } from "./web.js";
 
 const SYNC_INTERVAL_MS = 60000;
-
-export function requireApproval(store: Store, config: Config): Pending {
-  const pending = store.get("notification", Pending);
-  const approval = store.get("approval", Approval);
-  requireCondition(pending && approval, "Merchant connection is not approved");
-  requireCondition(
-    approval.txid === pending.txid &&
-      verifyIdentity(config, pending, approval.signature),
-    "Merchant approval is invalid",
-  );
-  return pending;
-}
 
 function authorized(header: unknown, secret: string): boolean {
   if (typeof header !== "string") return false;
@@ -58,6 +50,7 @@ export function serve(store: Store, config: Config): void {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Content-Security-Policy", "default-src 'none'");
+    res.setHeader("Referrer-Policy", "no-referrer");
 
     const reply = (status: number, value: unknown): void => {
       res.writeHead(status);
@@ -102,6 +95,8 @@ export function serve(store: Store, config: Config): void {
         return;
       }
 
+      if (await handlePublic(req, res, store, config)) return;
+
       if (req.method !== "POST" || req.url !== "/v1/payment-requests") {
         reply(404, { error: "Not found" });
         return;
@@ -126,15 +121,11 @@ export function serve(store: Store, config: Config): void {
       const allocation = store.allocate(
         id, input.amountSats, index => deriveAddress(config, index),
       );
-      const amount = allocation.amount_sats;
-      const bitcoinUri = `bitcoin:${allocation.address}` +
-        (amount ? `?amount=${(amount / 100000000).toFixed(8)}` : "");
-
       reply(200, {
         id: allocation.request_id,
         address: allocation.address,
-        amountSats: amount,
-        bitcoinUri,
+        amountSats: allocation.amount_sats,
+        bitcoinUri: bitcoinUri(allocation.address, allocation.amount_sats),
         network: config.network,
       });
     } catch (error) {
@@ -146,10 +137,12 @@ export function serve(store: Store, config: Config): void {
 
   // Requests never wait on Tor: they are served only from addresses this
   // loop has already registered.
+  const state: SyncState = {};
   let syncing = false;
   const sync = async (): Promise<void> => {
     if (syncing) return;
     syncing = true;
+    state.lastAttempt = new Date().toISOString();
     try {
       const pairing = store.get("pairing", Pairing);
       requireCondition(pairing, "No Dojo pairing");
@@ -157,16 +150,19 @@ export function serve(store: Store, config: Config): void {
         store, config, await connectDojo(pairing, config.network),
       );
       if (result.halted) console.error(result.halted);
+      state.lastSuccess = new Date().toISOString();
+      state.lastResult = result;
+      delete state.lastError;
     } catch (error) {
-      console.error(`Dojo sync failed: ${
-        error instanceof Error ? error.message : "unknown error"
-      }`);
+      state.lastError = error instanceof Error ? error.message : "unknown error";
+      console.error(`Dojo sync failed: ${state.lastError}`);
     } finally {
       syncing = false;
     }
   };
   void sync();
   const timer = setInterval(() => void sync(), SYNC_INTERVAL_MS);
+  const admin = serveAdmin(store, config, state);
 
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
@@ -181,6 +177,7 @@ export function serve(store: Store, config: Config): void {
 
   const shutdown = (): void => {
     clearInterval(timer);
+    admin?.close();
     server.close(() => {
       store.close();
       process.exit(0);
