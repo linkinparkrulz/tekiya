@@ -6,7 +6,7 @@ import {
   type NetworkName,
 } from "./config.js";
 import {
-  createWallet, deriveAddress, identityStatement, verifyIdentity,
+  createWallet, deriveAddress, identityStatement, signedStatement,
 } from "./bitcoin.js";
 import { requireApproval } from "./approval.js";
 import { serveAdmin } from "./admin.js";
@@ -91,8 +91,10 @@ export function serve(store: Store, network: NetworkName): void {
         }
         const pending = store.get("notification", Pending);
         const approval = store.get("approval", Approval);
-        const verified = Boolean(pending && approval &&
-          verifyIdentity(config, pending, approval.signature));
+        const signed = pending && approval
+          ? signedStatement(config, pending, approval.signature)
+          : undefined;
+        const verified = signed !== undefined;
         reply(200, {
           network: config.network,
           onion: config.onion,
@@ -100,7 +102,9 @@ export function serve(store: Store, network: NetworkName): void {
           dispenserPaymentCode: createWallet(
             config.seedHex, config.network,
           ).sender.toBase58(),
-          statement: pending ? identityStatement(config, pending) : null,
+          // The exact signed text, so others can verify the signature.
+          statement: signed ??
+            (pending ? identityStatement(config, pending) : null),
           signature: verified ? approval?.signature : null,
           signatureValid: verified,
           notice: "Identity binding, not independent address verification",

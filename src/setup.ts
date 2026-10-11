@@ -275,16 +275,43 @@ export async function issueTestAddress(
   );
 }
 
+/**
+ * Accepts a bare base64 signature or a wallet's full signed-message block
+ * ("-----BEGIN BITCOIN SIGNED MESSAGE-----" … "-----END BITCOIN SIGNATURE-----").
+ */
+export function extractSignature(input: string, expectedAddress: string): string {
+  const text = input.trim();
+  const armor = /-----BEGIN BITCOIN SIGNATURE-----([\s\S]*?)-----END BITCOIN SIGNATURE-----/
+    .exec(text);
+  if (!armor) return text;
+
+  const lines = (armor[1] ?? "").split(/\r?\n/).map(line => line.trim())
+    .filter(Boolean);
+  const address = lines.find(line => /^Address:/i.test(line))
+    ?.replace(/^Address:\s*/i, "");
+  requireCondition(
+    address === undefined || address === expectedAddress,
+    `The message was signed with ${address}; sign it with your PayNym ` +
+    `notification address ${expectedAddress}`,
+  );
+  const signature = lines.filter(line => !/^[A-Za-z-]+:/.test(line)).join("");
+  requireCondition(signature, "No signature found in the signed message");
+  return signature;
+}
+
 export function approve(
   store: Store,
   config: Config,
   pending: Pending,
-  signature: string,
+  input: string,
 ): void {
-  const text = signature.trim();
+  const address = receiver(config.merchantCode, config.network)
+    .getNotificationAddress();
+  const text = extractSignature(input, address);
   requireCondition(
     verifyIdentity(config, pending, text),
-    "Merchant signature does not match the exact approval statement",
+    "The signature does not match the approval text. Sign the exact text " +
+    `shown, unchanged, with your PayNym notification address ${address}.`,
   );
   requireCondition(!store.get("approval", Approval), "Already approved");
   store.insert("approval", {

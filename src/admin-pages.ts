@@ -225,14 +225,16 @@ function signStep(config: Config, pending: Pending): string {
   return `<h2>Approve</h2>
 <div class="notice">Test payment confirmed. Make sure your merchant wallet
 shows it and that you have spent it before approving.</div>
-<p>Sign this exact text in your merchant wallet with the key of its PayNym
-notification address, then paste the signature below.</p>
+<p>In your merchant wallet, sign this exact text with your PayNym (its
+notification address), then paste the result below. Either the signature
+alone or the whole signed-message block works.</p>
 <label for="statement">Text to sign</label>
 <textarea id="statement" readonly rows="14">${escape(statement)}</textarea>
 <p class="hint">Signing address: <span class="mono">${escape(signer)}</span></p>
 <form method="post" action="/setup/approve" class="stack">
-<div><label for="signature">Signature</label>
-<textarea id="signature" name="signature" required rows="3"></textarea></div>
+<div><label for="signature">Signature or signed message</label>
+<textarea id="signature" name="signature" required rows="6"
+  placeholder="-----BEGIN BITCOIN SIGNED MESSAGE-----"></textarea></div>
 <button type="submit">Approve and go live</button>
 </form>`;
 }

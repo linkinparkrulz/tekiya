@@ -1,11 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { IncomingMessage } from "node:http";
-import { createWallet } from "../src/bitcoin.js";
+import { Transaction } from "bitcoinjs-lib";
+import { Approval, profiles } from "../src/config.js";
+import {
+  buildNotification, createWallet, identityStatement, messages,
+} from "../src/bitcoin.js";
 import { currentStep } from "../src/admin-pages.js";
 import { sameOrigin } from "../src/admin.js";
 import {
-  initialize, normalizeOnion, parsePairing, suggestFee, usableFunding,
+  approve, initialize, normalizeOnion, parsePairing, suggestFee,
+  usableFunding,
 } from "../src/setup.js";
 import { Store } from "../src/store.js";
 
@@ -90,4 +95,56 @@ test("dashboard forms accept only same-origin posts", () => {
     origin: "http://evil.example", host: "127.0.0.1:8089",
   })), false);
   assert.equal(sameOrigin(request({ host: "127.0.0.1:8089" })), false);
+});
+
+test("approval accepts Ashigaru's signed-message block and BIP47 suffix", () => {
+  const network = "testnet4";
+  const merchant = createWallet("22".repeat(64), network);
+  const config = {
+    network, seedHex: "11".repeat(64), merchantCode: merchant.sender.toBase58(),
+    onion: `http://${onion}`, apiToken: "33".repeat(32),
+  } as const;
+  const funding = new Transaction();
+  funding.addInput(Buffer.alloc(32, 7), 0);
+  funding.addOutput(createWallet(config.seedHex, network).fundingScript, 50000n);
+  const pending = buildNotification(config, funding.toHex(), 0, 1000);
+  const statement = identityStatement(config, pending);
+  const address = merchant.sender.getNotificationAddress();
+  const sign = (text: string) => Buffer.from(messages.sign(
+    text, merchant.sender.getNotificationPrivateKey(), true,
+    profiles[network].bitcoin.messagePrefix,
+  )).toString("base64");
+  const block = (text: string, signature: string, signer = address) =>
+    `-----BEGIN BITCOIN SIGNED MESSAGE-----\n${text}\n` +
+    "-----BEGIN BITCOIN SIGNATURE-----\nVersion: Bitcoin-qt (1.0)\n" +
+    `Address: ${signer}\n\n${signature}\n-----END BITCOIN SIGNATURE-----\n`;
+
+  const ashigaru = `${statement}\n\nBIP47: ${config.merchantCode}`;
+  const fresh = () => {
+    const store = new Store(":memory:");
+    return { store, run: (input: string) => approve(store, config, pending, input) };
+  };
+
+  // Ashigaru: full block, with the appended BIP47 line.
+  let s = fresh();
+  s.run(block(ashigaru, sign(ashigaru)));
+  assert.ok(s.store.get("approval", Approval));
+  s.store.close();
+
+  // A bare signature over the exact statement.
+  s = fresh();
+  s.run(sign(statement));
+  s.store.close();
+
+  // Another code in the suffix, a different address or text is refused.
+  s = fresh();
+  const other = `${statement}\n\nBIP47: ${createWallet("44".repeat(64), network).sender.toBase58()}`;
+  assert.throws(() => s.run(sign(other)), /does not match/);
+  assert.throws(
+    () => s.run(block(ashigaru, sign(ashigaru), "mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")),
+    /signed with mxxx/,
+  );
+  assert.throws(() => s.run(sign(`${statement}\n`)), /does not match/);
+  assert.equal(s.store.get("approval", Approval), undefined);
+  s.store.close();
 });

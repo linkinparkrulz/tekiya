@@ -190,21 +190,38 @@ export function identityStatement(config: Config, pending: Pending): string {
   ].join("\n");
 }
 
+/**
+ * The exact text a valid signature covers, if any. Ashigaru's PayNym
+ * signing appends "\n\nBIP47: <payment code>"; only the merchant's own
+ * code is accepted there, which the statement already names.
+ */
+export function signedStatement(
+  config: Config,
+  pending: Pending,
+  signature: string,
+): string | undefined {
+  const statement = identityStatement(config, pending);
+  const address = receiver(config.merchantCode, config.network)
+    .getNotificationAddress();
+  return [statement, `${statement}\n\nBIP47: ${config.merchantCode}`]
+    .find(text => {
+      try {
+        return messages.verify(
+          text, address, signature,
+          profiles[config.network].bitcoin.messagePrefix,
+        );
+      } catch {
+        return false;
+      }
+    });
+}
+
 export function verifyIdentity(
   config: Config,
   pending: Pending,
   signature: string,
 ): boolean {
-  try {
-    return messages.verify(
-      identityStatement(config, pending),
-      receiver(config.merchantCode, config.network).getNotificationAddress(),
-      signature,
-      profiles[config.network].bitcoin.messagePrefix,
-    );
-  } catch {
-    return false;
-  }
+  return signedStatement(config, pending, signature) !== undefined;
 }
 
 export function reconstruct(config: Config, pending: Pending): Pending {
