@@ -14,6 +14,7 @@ import {
   approve, broadcastNotification, confirmedNotification, connectPaired,
   initialize, issueTestAddress, pairDojo, parsePairing, prepareNotification,
 } from "./setup.js";
+import { registerPaynym } from "./paynym.js";
 import { DIRECTORY, torJson } from "./tor.js";
 import { serve } from "./server.js";
 
@@ -224,6 +225,10 @@ async function main(): Promise<void> {
         break;
       }
 
+      case "paynym":
+        print(await registerPaynym(store, config));
+        break;
+
       case "statement":
         print(identityStatement(config, getPending()));
         break;
@@ -242,8 +247,8 @@ async function main(): Promise<void> {
       default:
         throw new Error(
           "Commands: serve (setup runs in its dashboard), init, info, token, " +
-          "directory, pair, sync, status, profile, resume-issuance, prepare, " +
-          "broadcast, test-address, statement, approve",
+          "directory, pair, paynym, sync, status, profile, resume-issuance, " +
+          "prepare, broadcast, test-address, statement, approve",
         );
     }
   } finally {

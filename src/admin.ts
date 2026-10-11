@@ -138,6 +138,8 @@ export function serveAdmin(
         form.get("merchantCode") ?? "",
         form.get("onion") || detectOnion() || "",
       );
+      // Claims the dispenser's PayNym in the background.
+      void monitor.run();
     },
     "/setup/pair": pair,
     "/settings/pair": pair,
@@ -187,6 +189,7 @@ export function serveAdmin(
       store.clearHalt();
     },
     "/check": () => monitor.run(),
+    "/paynym": () => monitor.registerPaynym(),
   };
 
   const render = (error?: string): string => dashboard({

@@ -7,7 +7,7 @@ import {
 } from "./config.js";
 import {
   buildNotification, createWallet, deriveAddress, receiver, reconstruct,
-  verifyIdentity,
+  segwitCode, verifyIdentity,
 } from "./bitcoin.js";
 import { syncDojo, type DojoApi } from "./registrar.js";
 import { Store, type Allocation } from "./store.js";
@@ -25,9 +25,9 @@ export function initialize(
     !store.get("config", Config),
     "Installation already initialized; replacement refused",
   );
-  const code = merchantCode.trim();
+  let code: string;
   try {
-    receiver(code, network);
+    code = segwitCode(merchantCode.trim(), network);
   } catch {
     throw new Error("That is not a valid BIP47 payment code");
   }
@@ -40,6 +40,20 @@ export function initialize(
   };
   store.insert("config", config);
   return config;
+}
+
+/**
+ * Installations created before merchant codes were stored in SegWit form:
+ * switch to it while nothing has been signed. An approval signs the
+ * statement naming the code, so an approved installation keeps its code.
+ */
+export function migrateMerchantCode(store: Store): boolean {
+  const config = store.get("config", Config);
+  if (!config || store.get("approval", Approval)) return false;
+  const code = segwitCode(config.merchantCode, config.network);
+  if (code === config.merchantCode) return false;
+  store.replace("config", { ...config, merchantCode: code });
+  return true;
 }
 
 // Accepts "abc…xyz.onion", with or without http:// and a trailing slash.

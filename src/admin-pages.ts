@@ -15,6 +15,7 @@ import {
   MAX_FUNDING_SATS, TEST_REQUEST_ID, broadcastRecorded, suggestFee,
   usableFunding,
 } from "./setup.js";
+import { paynymStatus } from "./paynym.js";
 import { Store } from "./store.js";
 
 export type Step =
@@ -356,6 +357,7 @@ ${dojoForm("/settings/pair", "Switch Dojo")}
 bearer token. Keep it on your server, never in browser code.</p>
 <div class="address">${escape(config.apiToken)}</div>
 </details>
+${paynymCard(view)}
 <details class="card"><summary>Identity</summary><dl>
 <dt>Network</dt><dd>${escape(config.network)}</dd>
 <dt>Merchant</dt><dd class="mono">${escape(config.merchantCode)}</dd>
@@ -363,6 +365,32 @@ bearer token. Keep it on your server, never in browser code.</p>
 <dt>Funding</dt><dd class="mono">${escape(wallet.fundingAddress)}</dd>
 <dt>Notification</dt><dd class="mono">${escape(pending?.txid ?? "none")}</dd>
 </dl></details>`;
+}
+
+// Runs in the background as soon as the dispenser wallet exists.
+function paynymCard(view: View): string {
+  const { store, monitor } = view;
+  if (!store.get("config", Config)) return "";
+  const { dispenser, follow } = paynymStatus(store);
+  const retry = `<form method="post" action="/paynym" class="inline">
+<button class="secondary" type="submit">Try now</button></form>`;
+
+  let body: string;
+  if (dispenser && follow) {
+    body = `<p>${badge(true, "registered", "")} <strong>${
+      escape(dispenser.nymName)}</strong></p>
+<p class="hint">Claimed with the dispenser's SegWit payment code and
+following your PayNym.</p>`;
+  } else if (monitor.paynymError) {
+    body = `${dispenser ? `<p><strong>${escape(dispenser.nymName)}</strong>
+claimed; following your PayNym is pending.</p>` : ""}
+<p class="hint">${escape(monitor.paynymError)}</p>
+<div class="actions">${retry}</div>`;
+  } else {
+    body = `<p class="hint">Registering the dispenser with the PayNym
+directory over Tor and following your PayNym…</p>`;
+  }
+  return `<section class="card"><h2>PayNym</h2>${body}</section>`;
 }
 
 export function dashboard(view: View): string {
@@ -404,7 +432,8 @@ ${view.error ? `<div class="notice bad">${escape(view.error)}</div>` : ""}`;
 
   return page("Set up Tekiya", `${top}
 <div class="layout">
-<aside class="card"><h2>Setup</h2>${progress}</aside>
+<aside class="stack"><section class="card"><h2>Setup</h2>${progress}</section>
+${paynymCard(view)}</aside>
 <section class="card stack">${body}</section>
 </div>
 <p class="muted">Setup ${index + 1} of ${PROGRESS.length}.

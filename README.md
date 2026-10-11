@@ -14,8 +14,10 @@ Open http://127.0.0.1:8089 on the same machine (from elsewhere, tunnel it:
 `ssh -L 8089:127.0.0.1:8089 your-server`) and follow the setup. The
 dashboard walks through every step:
 
-1. Paste your merchant wallet's payment code. The onion address is
-   detected automatically.
+1. Paste your merchant wallet's payment code (either form; it is stored
+   in SegWit form). The onion address is detected automatically. Tekiya
+   then claims the dispenser's PayNym with its SegWit payment code and
+   follows your PayNym, in the background over Tor.
 2. Paste the pairing of the Dojo your merchant wallet uses.
 3. Send about 20,000 sats to the address shown. Funding is detected.
 4. Create and broadcast the one-time notification transaction.
@@ -30,6 +32,23 @@ for the onion address, which Tor writes to
 
 Your payment page is then live on the onion address. Name it in the
 dashboard. Set `NYM_NETWORK=mainnet` only after testing on testnet4.
+
+## PayNym directory
+
+As soon as the dispenser wallet exists, Tekiya creates and claims its
+PayNym with the dispenser's SegWit payment code and follows the merchant's
+PayNym. The merchant's PayNym may list either form of its code. Failures
+are retried every ten minutes and shown in the dashboard, which also has a
+Try now button. `npm run cli -- paynym` runs it on demand.
+
+Requests go over Tor to the directory's onion service
+(`http://paynym25chftmsywv4v2r67agbrr62lcxagsf4tymbzpeeucucy2ivad.onion/api/v1/`).
+Set `NYM_PAYNYM_API` to use another onion URL, or an HTTPS URL reached
+through Tor.
+
+Following publishes the dispenser–merchant relationship in a public
+directory. It does not affect payment discovery, which relies on the
+notification transaction.
 
 ## Dashboard access
 
@@ -108,6 +127,7 @@ npm run cli -- COMMAND.
 - token
 - directory
 - pair PRIVATE_PAIRING_FILE
+- paynym
 - sync
 - status
 - profile NAME [DESCRIPTION] (or profile --clear)

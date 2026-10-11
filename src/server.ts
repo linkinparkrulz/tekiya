@@ -13,6 +13,7 @@ import { serveAdmin } from "./admin.js";
 import { bitcoinUri } from "./html.js";
 import { Store } from "./store.js";
 import { Monitor } from "./monitor.js";
+import { migrateMerchantCode } from "./setup.js";
 import { handlePublic } from "./web.js";
 
 const SYNC_INTERVAL_MS = 60000;
@@ -49,6 +50,9 @@ export function serve(store: Store, network: NetworkName): void {
     !stored || stored.network === network,
     "Stored network mismatch",
   );
+  if (migrateMerchantCode(store)) {
+    console.log("Merchant payment code switched to its SegWit form");
+  }
 
   const server = createServer(async (req, res) => {
     res.setHeader("Content-Type", "application/json; charset=utf-8");

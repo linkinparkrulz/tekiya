@@ -43,6 +43,33 @@ export function receiver(code: string, networkName: NetworkName) {
   return bip47.fromBase58(code, profiles[networkName].bitcoin);
 }
 
+// Samourai's SegWit flag: byte 79 of the 80-byte payment code body.
+const SEGWIT_FEATURE_BYTE = 79;
+
+/**
+ * The SegWit form of a payment code. Both forms share the same keys and
+ * addresses; the flag tells senders such as Ashigaru to pay P2WPKH.
+ */
+export function segwitCode(code: string, networkName: NetworkName): string {
+  return withSegwitFlag(code, networkName, 1);
+}
+
+// Both forms of one payment code: SegWit first, then legacy.
+export function codeForms(code: string, networkName: NetworkName): string[] {
+  return [withSegwitFlag(code, networkName, 1), withSegwitFlag(code, networkName, 0)];
+}
+
+function withSegwitFlag(
+  code: string,
+  networkName: NetworkName,
+  flag: 0 | 1,
+): string {
+  const network = profiles[networkName].bitcoin;
+  const body = Uint8Array.from(bip47.fromBase58(code, network).paymentCode);
+  body[SEGWIT_FEATURE_BYTE] = flag;
+  return bip47.fromBuffer(body, network).toBase58();
+}
+
 export function deriveAddress(config: Config, index: number): string {
   requireCondition(
     Number.isSafeInteger(index) && index >= 0 && index < ISSUANCE_LIMIT,
@@ -193,7 +220,7 @@ export function identityStatement(config: Config, pending: Pending): string {
 /**
  * The exact text a valid signature covers, if any. Ashigaru's PayNym
  * signing appends "\n\nBIP47: <payment code>"; only the merchant's own
- * code is accepted there, which the statement already names.
+ * code is accepted there, in either its SegWit or legacy form.
  */
 export function signedStatement(
   config: Config,
@@ -203,17 +230,18 @@ export function signedStatement(
   const statement = identityStatement(config, pending);
   const address = receiver(config.merchantCode, config.network)
     .getNotificationAddress();
-  return [statement, `${statement}\n\nBIP47: ${config.merchantCode}`]
-    .find(text => {
-      try {
-        return messages.verify(
-          text, address, signature,
-          profiles[config.network].bitcoin.messagePrefix,
-        );
-      } catch {
-        return false;
-      }
-    });
+  const texts = [statement, ...codeForms(config.merchantCode, config.network)
+    .map(code => `${statement}\n\nBIP47: ${code}`)];
+  return texts.find(text => {
+    try {
+      return messages.verify(
+        text, address, signature,
+        profiles[config.network].bitcoin.messagePrefix,
+      );
+    } catch {
+      return false;
+    }
+  });
 }
 
 export function verifyIdentity(

@@ -4,7 +4,10 @@ import {
   connectPaired, notificationStatus, observeFunding,
   type FundingObservation,
 } from "./setup.js";
+import { paynymComplete, registerPaynym } from "./paynym.js";
 import { Store } from "./store.js";
+
+const PAYNYM_RETRY_MS = 10 * 60 * 1000;
 
 export interface MonitorState {
   lastAttempt?: string;
@@ -14,16 +17,20 @@ export interface MonitorState {
   funding?: FundingObservation;
   // Undefined until the Dojo has shown the notification transaction.
   notificationConfirmations?: number;
+  paynymError?: string;
+  paynymAttempt?: string;
 }
 
 /**
- * Background Dojo checks: funding and notification progress during setup,
- * address registration and payment status afterwards. Pages read only the
- * cached state, so no web request waits on Tor.
+ * Background checks: the dispenser's PayNym claim and merchant follow,
+ * funding and notification progress during setup, address registration and
+ * payment status afterwards. Pages read only the cached state, so no web
+ * request waits on Tor.
  */
 export class Monitor {
   readonly state: MonitorState = {};
   #running: Promise<void> | undefined;
+  #paynym: Promise<void> | undefined;
   #timer: NodeJS.Timeout | undefined;
 
   constructor(
@@ -48,9 +55,43 @@ export class Monitor {
     clearInterval(this.#timer);
   }
 
+  // Claims the PayNym now, regardless of the retry delay; joins an attempt
+  // already in progress.
+  registerPaynym(): Promise<void> {
+    this.#paynym ??= this.#registerPaynym().finally(() => {
+      this.#paynym = undefined;
+    });
+    return this.#paynym;
+  }
+
+  async #registerPaynym(): Promise<void> {
+    const config = this.store.get("config", Config);
+    if (!config || paynymComplete(this.store)) return;
+    this.state.paynymAttempt = new Date().toISOString();
+    try {
+      await registerPaynym(this.store, config);
+      delete this.state.paynymError;
+    } catch (error) {
+      this.state.paynymError =
+        error instanceof Error ? error.message : "unknown error";
+      console.error(`PayNym registration: ${this.state.paynymError}`);
+    }
+  }
+
   async #check(): Promise<void> {
     const config = this.store.get("config", Config);
     if (!config || config.network !== this.network) return;
+
+    const last = this.state.paynymAttempt;
+    if (
+      !paynymComplete(this.store) &&
+      (!last || !this.state.paynymError ||
+        Date.now() - Date.parse(last) > PAYNYM_RETRY_MS)
+    ) {
+      // Runs alongside the Dojo checks; a slow directory never delays them.
+      void this.registerPaynym();
+    }
+
     if (!this.store.get("pairing", Pairing)) return;
 
     this.state.lastAttempt = new Date().toISOString();
