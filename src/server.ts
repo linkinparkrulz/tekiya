@@ -1,5 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer } from "node:http";
 import { z } from "zod";
 import {
   Approval, Config, Pending, Unavailable, requireCondition,
@@ -10,32 +9,13 @@ import {
 } from "./bitcoin.js";
 import { requireApproval } from "./approval.js";
 import { serveAdmin } from "./admin.js";
-import { bitcoinUri } from "./html.js";
 import { Store } from "./store.js";
 import { Monitor } from "./monitor.js";
 import { migrateMerchantCode } from "./setup.js";
+import { handleApi } from "./api.js";
 import { handlePublic } from "./web.js";
 
 const SYNC_INTERVAL_MS = 60000;
-
-function authorized(header: unknown, secret: string): boolean {
-  if (typeof header !== "string") return false;
-  const hash = (value: string) =>
-    createHash("sha256").update(value).digest();
-  return timingSafeEqual(hash(header), hash(`Bearer ${secret}`));
-}
-
-async function readBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const part of req) {
-    const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
-    size += chunk.length;
-    requireCondition(size <= 4096, "Request body exceeds 4096 bytes");
-    chunks.push(chunk);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-}
 
 export function serve(store: Store, network: NetworkName): void {
   const port = z.coerce.number().int().min(1).max(65535)
@@ -116,40 +96,13 @@ export function serve(store: Store, network: NetworkName): void {
         return;
       }
 
+      if ((req.url ?? "").startsWith("/v1/")) {
+        await handleApi(req, res, store, network);
+        return;
+      }
+
       if (await handlePublic(req, res, store, network)) return;
-
-      if (req.method !== "POST" || req.url !== "/v1/payment-requests") {
-        reply(404, { error: "Not found" });
-        return;
-      }
-
-      if (!config) throw new Unavailable("Not set up");
-      if (!authorized(req.headers.authorization, config.apiToken)) {
-        reply(401, { error: "Unauthorized" });
-        return;
-      }
-
-      requireCondition(
-        req.headers["content-type"]?.split(";")[0] === "application/json",
-        "Expected application/json",
-      );
-      requireApproval(store, config);
-
-      const input = z.object({
-        amountSats: z.number().int().min(0).max(100000000).default(0),
-      }).strict().parse(await readBody(req));
-
-      const id = z.string().parse(req.headers["idempotency-key"]);
-      const allocation = store.allocate(
-        id, input.amountSats, index => deriveAddress(config, index),
-      );
-      reply(200, {
-        id: allocation.request_id,
-        address: allocation.address,
-        amountSats: allocation.amount_sats,
-        bitcoinUri: bitcoinUri(allocation.address, allocation.amount_sats),
-        network: config.network,
-      });
+      reply(404, { error: "Not found" });
     } catch (error) {
       reply(error instanceof Unavailable ? 503 : 400, {
         error: error instanceof Error ? error.message : "Request failed",

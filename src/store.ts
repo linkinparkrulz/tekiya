@@ -16,6 +16,40 @@ export type Allocation = z.infer<typeof Allocation>;
 
 const Halt = z.object({ reason: z.string(), at: z.string() });
 
+export type PaymentState = "pending" | "seen" | "paid" | "underpaid";
+
+/**
+ * Payment state of one request from what its address received. A request
+ * without an amount is paid by any confirmed payment.
+ */
+export function paymentState(
+  amountSats: number,
+  confirmed: number,
+  unconfirmed: number,
+): PaymentState {
+  const target = Math.max(amountSats, 1);
+  if (confirmed >= target) return "paid";
+  if (confirmed + unconfirmed >= target) return "seen";
+  if (confirmed > 0) return "underpaid";
+  return "pending";
+}
+
+const StatusRow = Allocation.extend({
+  confirmed_sats: z.number().int().nullable(),
+  unconfirmed_sats: z.number().int().nullable(),
+  updated_at: z.string().nullable(),
+  block_height: z.number().int().nullable(),
+});
+
+export interface PaymentStatus {
+  readonly allocation: Allocation;
+  readonly confirmedSats: number;
+  readonly unconfirmedSats: number;
+  readonly state: PaymentState;
+  readonly firstConfirmedBlock: number | null;
+  readonly checkedAt: string | null;
+}
+
 export interface AllocateOptions {
   // Only the testnet gap diagnostic may issue beyond the lookahead.
   readonly enforceLookahead?: boolean;
@@ -196,6 +230,29 @@ export class Store {
       return "Registered address differs from the derived address";
     }
     return undefined;
+  }
+
+  paymentStatus(id: string): PaymentStatus | undefined {
+    const row = this.db.prepare(`
+      SELECT a.*, v.confirmed_sats, v.unconfirmed_sats, v.updated_at,
+        p.block_height
+      FROM allocations a
+      LEFT JOIN received v ON v.idx = a.idx
+      LEFT JOIN payments p ON p.idx = a.idx
+      WHERE a.request_id = ?
+    `).get(id);
+    if (!row) return undefined;
+    const value = StatusRow.parse(row);
+    const confirmed = value.confirmed_sats ?? 0;
+    const unconfirmed = value.unconfirmed_sats ?? 0;
+    return {
+      allocation: Allocation.parse(row),
+      confirmedSats: confirmed,
+      unconfirmedSats: unconfirmed,
+      state: paymentState(value.amount_sats, confirmed, unconfirmed),
+      firstConfirmedBlock: value.block_height,
+      checkedAt: value.updated_at,
+    };
   }
 
   findAllocation(id: string): Allocation | undefined {

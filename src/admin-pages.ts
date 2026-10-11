@@ -426,8 +426,12 @@ merchant wallet to it, so existing payments are imported first.</p>
 ${dojoForm("/settings/pair", "Switch Dojo")}
 </details>
 <details class="card"><summary>Integration API</summary>
-<p>For a shop backend: <code>POST /v1/payment-requests</code> with this
-bearer token. Keep it on your server, never in browser code.</p>
+<p>For a shop or other backend: create a request with
+<code>POST /v1/payment-requests</code>, follow it with
+<code>GET /v1/payment-requests/&lt;id&gt;</code>, and check
+<code>GET /v1/status</code> before checkout. Send this bearer token; keep it
+on your server, never in browser code. Full reference:
+<code>docs/API.md</code> in the Tekiya repository.</p>
 <div class="address">${escape(config.apiToken)}</div>
 </details>
 ${paynymCard(view)}

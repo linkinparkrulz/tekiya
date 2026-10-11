@@ -51,6 +51,14 @@ Following publishes the dispenser–merchant relationship in a public
 directory. It does not affect payment discovery, which relies on the
 notification transaction.
 
+## Integration API
+
+Shops and other backends request a fresh address per order and follow its
+payment status over a small token-protected API; see
+[docs/API.md](docs/API.md). A storefront is meant to be its own
+application on top of it, keeping catalogue, prices and buyer details out
+of Tekiya.
+
 ## Dashboard access
 
 The dashboard never appears on the onion service. `NYM_ADMIN_AUTH` sets
