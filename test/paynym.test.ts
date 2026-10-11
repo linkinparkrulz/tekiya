@@ -1,13 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Transaction } from "bitcoinjs-lib";
-import { Config, profiles } from "../src/config.js";
+import { z } from "zod";
+import { Approval, Config, profiles } from "../src/config.js";
 import {
   buildNotification, codeForms, createWallet, identityStatement, messages,
   receiver, segwitCode, verifyIdentity,
 } from "../src/bitcoin.js";
 import { DEFAULT_PAYNYM_API, paynymApi } from "../src/paynym.js";
-import { migrateMerchantCode } from "../src/setup.js";
+import { REAPPROVAL_NOTICE, migrateMerchantCode } from "../src/setup.js";
 import { Store } from "../src/store.js";
 
 const network = "testnet4";
@@ -41,7 +42,7 @@ test("unapproved installations switch to the SegWit merchant code", () => {
   }
 });
 
-test("approved installations keep the code they signed", () => {
+test("approved installations switch too and are asked to sign again", () => {
   const store = new Store(":memory:");
   try {
     store.insert("config", {
@@ -49,8 +50,10 @@ test("approved installations keep the code they signed", () => {
       onion: `http://${"a".repeat(56)}.onion`, apiToken: "33".repeat(32),
     });
     store.insert("approval", { txid: "x", signature: "y", createdAt: "z" });
-    assert.equal(migrateMerchantCode(store), false);
-    assert.equal(store.get("config", Config)?.merchantCode, legacy);
+    assert.equal(migrateMerchantCode(store), true);
+    assert.equal(store.get("config", Config)?.merchantCode, segwit);
+    assert.equal(store.get("approval", Approval), undefined);
+    assert.ok(store.get(REAPPROVAL_NOTICE, z.object({ reason: z.string() })));
   } finally {
     store.close();
   }

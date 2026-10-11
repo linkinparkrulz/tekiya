@@ -9,8 +9,8 @@ import {
 import { currentStep } from "../src/admin-pages.js";
 import { sameOrigin } from "../src/admin.js";
 import {
-  approve, initialize, normalizeOnion, parsePairing, suggestFee,
-  usableFunding,
+  FeeChoice, approve, chosenRate, feeForRate, feePresets, fundingRequired,
+  initialize, normalizeOnion, parsePairing, usableFunding,
 } from "../src/setup.js";
 import { Store } from "../src/store.js";
 
@@ -46,11 +46,42 @@ test("pairings are read in Dojo's export format and Tekiya's", () => {
   }), "mainnet"));
 });
 
-test("notification fees follow the Dojo estimate within builder limits", () => {
-  assert.equal(suggestFee(undefined), 237);
-  assert.equal(suggestFee(0.5), 237);
-  assert.equal(suggestFee(2), 474);
-  assert.equal(suggestFee(1000), 10000);
+test("fee presets never go below 25 sat/vB and match higher estimates", () => {
+  const rates = (fees: Record<string, number>) =>
+    feePresets(fees).map(preset => preset.rate);
+  assert.deepEqual(rates({}), [25, 25, 38]);
+  assert.deepEqual(rates({ "2": 3, "6": 2, "24": 1 }), [25, 25, 38]);
+  assert.deepEqual(rates({ "2": 80, "6": 40, "24": 30 }), [30, 40, 80]);
+  assert.equal(chosenRate(undefined, { "6": 40 }), 40);
+  assert.equal(chosenRate({ preset: "custom", customRate: 60 }), 60);
+  assert.throws(() => FeeChoice.parse({ preset: "custom", customRate: 5 }));
+});
+
+test("exact funding pays the notification with no change left over", () => {
+  const code = createWallet("22".repeat(64), "testnet4").sender.toBase58();
+  const config = {
+    network: "testnet4", seedHex: "11".repeat(64), merchantCode: code,
+    onion: `http://${onion}`, apiToken: "33".repeat(32),
+  } as const;
+  const required = fundingRequired(config, 25);
+  // 546 sats to the wallet plus about 205 vB at 25 sat/vB.
+  assert.ok(required > 546 + 25 * 200 && required < 546 + 25 * 215, String(required));
+
+  const funding = new Transaction();
+  funding.addInput(Buffer.alloc(32, 9), 0);
+  funding.addOutput(createWallet(config.seedHex, "testnet4").fundingScript,
+    BigInt(required));
+  const fee = feeForRate(config, required, 25);
+  const pending = buildNotification(config, funding.toHex(), 0, fee);
+  const tx = Transaction.fromHex(pending.hex);
+  assert.equal(tx.outs.length, 2);
+  assert.equal(pending.changeSats, 0);
+  assert.ok(pending.feeRate >= 25, String(pending.feeRate));
+
+  // More funding keeps the rate and returns the rest as change.
+  const larger = feeForRate(config, 20000, 25);
+  assert.ok(larger < 20000 - 546 - 330);
+  assert.throws(() => feeForRate(config, required, 60), /covers at most/);
 });
 
 test("only confirmed funding within the limit is offered", () => {

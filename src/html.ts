@@ -93,6 +93,21 @@ th, td { text-align: left; padding: 0.45rem 0.6rem;
   border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--muted); font-weight: 600; }
 .nowrap { white-space: nowrap; }
+.copyable { user-select: all; }
+fieldset.dial { border: 0; padding: 0; margin: 0; display: grid; gap: 0.5rem; }
+fieldset.dial legend { font-weight: 600; margin-bottom: 0.5rem; padding: 0; }
+label.preset { display: flex; gap: 0.6rem; align-items: center;
+  font-weight: 400; margin: 0; padding: 0.6rem 0.8rem; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 8px; }
+label.preset:has(input:checked) { border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent); }
+label.preset.disabled { opacity: 0.5; cursor: not-allowed; }
+label.preset input[type=number] { width: 6rem; display: inline-block;
+  padding: 0.3rem 0.5rem; margin: 0 0.3rem; }
+details.addr summary { list-style: none; cursor: pointer; white-space: nowrap; }
+details.addr summary::-webkit-details-marker { display: none; }
+details.addr[open] summary { color: var(--muted); }
+details.addr span { display: block; word-break: break-all; margin-top: 0.25rem; }
 ol.steps { list-style: none; padding: 0; margin: 0; }
 ol.steps li { display: flex; gap: 0.6rem; padding: 0.3rem 0; }
 ol.steps li::before { content: ""; flex: none; width: 0.7rem; height: 0.7rem;

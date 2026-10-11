@@ -2,7 +2,7 @@ import { z } from "zod";
 import {
   ISSUANCE_LIMIT, REGISTRATION_POOL, requireCondition, type Config,
 } from "./config.js";
-import { deriveAddress, derivePaymentPubkey } from "./bitcoin.js";
+import { deriveAddress } from "./bitcoin.js";
 import { Store } from "./store.js";
 
 export type DojoApi = (
@@ -18,7 +18,10 @@ const WalletResponse = z.object({
   txs: z.array(z.object({
     hash: z.string().regex(/^[0-9a-f]{64}$/),
     block_height: z.number().int().positive().nullish(),
-    out: z.array(z.object({ addr: z.string().nullish() })).default([]),
+    out: z.array(z.object({
+      addr: z.string().nullish(),
+      value: z.number().int().nonnegative().default(0),
+    })).default([]),
   })),
 });
 
@@ -30,12 +33,12 @@ export interface SyncResult {
 
 /**
  * Registers addresses with the paired Dojo before they can be issued, and
- * records confirmed payments to issued addresses.
+ * records what issued addresses have received.
  *
- * The first `active=` lookup makes Dojo track an address, and a later
- * `new=` from the receiving wallet cannot erase it. Dojo hides import
- * failures behind a normal response, so every unpaid index is looked up
- * again on each pass; a missed import is retried.
+ * Only the P2WPKH address is registered: the first `active=` lookup makes
+ * Dojo track it, and a later `new=` from the receiving wallet cannot erase
+ * it. Dojo hides import failures behind a normal response, so every address
+ * is looked up again on each pass; a missed import is retried.
  */
 export async function syncDojo(
   store: Store,
@@ -49,33 +52,21 @@ export async function syncDojo(
     Math.max(options.through ?? -1, next + REGISTRATION_POOL - 1),
   );
 
-  const paid = new Set(z.array(z.number().int()).parse(
-    store.db.prepare("SELECT idx FROM payments").all()
-      .map(row => row.idx),
-  ));
-  // After re-pairing, paid indices are registered again so the new Dojo
-  // imports their history before the receiving wallet can declare them new.
-  const indices: number[] = [];
-  for (let index = 0; index <= last; index++) {
-    if (!paid.has(index) || store.registeredAddress(index) === undefined) {
-      indices.push(index);
-    }
-  }
-
   const registered: number[] = [];
   const confirmedPayments: number[] = [];
-  if (indices.length === 0) return { registered, confirmedPayments };
+  if (last < 0) return { registered, confirmedPayments };
 
-  // Pubkeys make Dojo track all three address forms the wallet may query.
-  const response = WalletResponse.parse(await api("wallet", {
-    active: indices.map(index => derivePaymentPubkey(config, index)).join("|"),
-  }));
+  const addresses = Array.from(
+    { length: last + 1 }, (_, index) => deriveAddress(config, index),
+  );
+  const response = WalletResponse.parse(
+    await api("wallet", { active: addresses.join("|") }),
+  );
 
   // Re-read: another process may have issued addresses during the request.
   const issued = store.nextIndex();
 
-  for (const index of indices) {
-    const address = deriveAddress(config, index);
+  for (const [index, address] of addresses.entries()) {
     const entry = response.addresses.find(item => item.address === address);
     requireCondition(
       entry,
@@ -94,14 +85,29 @@ export async function syncDojo(
 
     store.register(index, address);
     registered.push(index);
+    if (index >= issued) continue;
 
-    if (index >= issued || paid.has(index)) continue;
-    const payment = response.txs
-      .filter(tx => typeof tx.block_height === "number" &&
-        tx.out.some(output => output.addr === address))
-      .sort((a, b) => (a.block_height ?? 0) - (b.block_height ?? 0))[0];
-    if (typeof payment?.block_height === "number") {
-      store.recordPayment(index, payment.hash, payment.block_height);
+    let confirmed = 0;
+    let unconfirmed = 0;
+    let first: { hash: string; height: number } | undefined;
+    for (const tx of response.txs) {
+      const value = tx.out
+        .filter(output => output.addr === address)
+        .reduce((sum, output) => sum + output.value, 0);
+      if (value === 0 && !tx.out.some(output => output.addr === address)) {
+        continue;
+      }
+      if (typeof tx.block_height === "number") {
+        confirmed += value;
+        if (!first || tx.block_height < first.height) {
+          first = { hash: tx.hash, height: tx.block_height };
+        }
+      } else {
+        unconfirmed += value;
+      }
+    }
+    store.recordReceived(index, confirmed, unconfirmed);
+    if (first && store.recordPayment(index, first.hash, first.height)) {
       confirmedPayments.push(index);
     }
   }

@@ -5,6 +5,7 @@ import {
   Approval, Config, NetworkName, Pairing, Pending,
   onionUrl, requireCondition,
 } from "./config.js";
+import { MAX_FEE_RATE, NOTIFICATION_SATS } from "./bitcoin.js";
 import {
   buildNotification, createWallet, deriveAddress, receiver, reconstruct,
   segwitCode, verifyIdentity,
@@ -42,17 +43,32 @@ export function initialize(
   return config;
 }
 
+export const REAPPROVAL_NOTICE = "reapproval-notice";
+
 /**
- * Installations created before merchant codes were stored in SegWit form:
- * switch to it while nothing has been signed. An approval signs the
- * statement naming the code, so an approved installation keeps its code.
+ * Installations created before merchant codes were stored in SegWit form
+ * switch to it. The approval signed a statement naming the old code, so it
+ * is withdrawn and the dashboard asks for one new signature.
  */
 export function migrateMerchantCode(store: Store): boolean {
   const config = store.get("config", Config);
-  if (!config || store.get("approval", Approval)) return false;
+  if (!config) return false;
   const code = segwitCode(config.merchantCode, config.network);
   if (code === config.merchantCode) return false;
-  store.replace("config", { ...config, merchantCode: code });
+  store.db.exec("BEGIN IMMEDIATE");
+  try {
+    store.replace("config", { ...config, merchantCode: code });
+    if (store.remove("approval")) {
+      store.replace(REAPPROVAL_NOTICE, {
+        reason: "Your merchant payment code is now stored in its SegWit " +
+          "form, so the approval text changed. Sign it once more.",
+      });
+    }
+    store.db.exec("COMMIT");
+  } catch (error) {
+    store.db.exec("ROLLBACK");
+    throw error;
+  }
   return true;
 }
 
@@ -132,7 +148,8 @@ export interface FundingUtxo {
 
 export interface FundingObservation {
   readonly utxos: FundingUtxo[];
-  readonly feeRate: number | undefined;
+  // Dojo's estimates in sat/vB, keyed by target blocks ("2", "6", "24"…).
+  readonly fees: Record<string, number>;
 }
 
 export async function observeFunding(
@@ -153,17 +170,95 @@ export async function observeFunding(
         value: utxo.value,
         confirmations: utxo.confirmations,
       })),
-    feeRate: fees["6"] ?? fees["4"] ?? fees["2"],
+    fees,
   };
 }
 
-// The notification transaction is about 236 vB; builder limits apply.
-export const NOTIFICATION_VBYTES = 237;
 export const MAX_FUNDING_SATS = 1000000;
 
-export function suggestFee(feeRate: number | undefined): number {
-  const rate = Math.max(1, feeRate ?? 1);
-  return Math.min(10000, Math.max(200, Math.ceil(rate * NOTIFICATION_VBYTES)));
+// Never below this, whatever the estimates say; matched when they are higher.
+export const MIN_FEE_RATE = 25;
+
+export type FeePresetId = "economy" | "standard" | "priority";
+
+export interface FeePreset {
+  readonly id: FeePresetId;
+  readonly label: string;
+  readonly hint: string;
+  readonly rate: number;
+}
+
+/** Fee choices from the Dojo's estimates, each at least MIN_FEE_RATE. */
+export function feePresets(fees: Record<string, number> = {}): FeePreset[] {
+  const floor = (value: number | undefined) =>
+    Math.max(MIN_FEE_RATE, Math.ceil(value ?? 0));
+  const economy = floor(fees["24"] ?? fees["12"] ?? fees["6"]);
+  const standard = Math.max(economy, floor(fees["6"] ?? fees["4"]));
+  const priority = Math.max(
+    floor(fees["2"]), Math.ceil(standard * 1.5),
+  );
+  return [
+    { id: "economy", label: "Economy", hint: "within a day", rate: economy },
+    { id: "standard", label: "Standard", hint: "about an hour", rate: standard },
+    { id: "priority", label: "Priority", hint: "next blocks", rate: priority },
+  ];
+}
+
+export const FEE_CHOICE = "fee-choice";
+
+export const FeeChoice = z.object({
+  preset: z.enum(["economy", "standard", "priority", "custom"]),
+  customRate: z.number().int().min(MIN_FEE_RATE).max(MAX_FEE_RATE).optional(),
+});
+
+export type FeeChoice = z.infer<typeof FeeChoice>;
+
+export function chosenRate(
+  choice: FeeChoice | undefined,
+  fees: Record<string, number> = {},
+): number {
+  if (choice?.preset === "custom" && choice.customRate) return choice.customRate;
+  const presets = feePresets(fees);
+  return (presets.find(preset => preset.id === (choice?.preset ?? "standard"))
+    ?? presets[1])?.rate ?? MIN_FEE_RATE;
+}
+
+/**
+ * Virtual size of this installation's notification transaction, measured by
+ * building one from a stand-in funding output. Signatures vary by a byte,
+ * so one vbyte of margin is added.
+ */
+export function notificationVbytes(config: Config, withChange: boolean): number {
+  const wallet = createWallet(config.seedHex, config.network);
+  const value = withChange ? 100000 : NOTIFICATION_SATS + 300;
+  const funding = new Transaction();
+  funding.addInput(Buffer.alloc(32, 1), 0);
+  funding.addOutput(wallet.fundingScript, BigInt(value));
+  const built = buildNotification(config, funding.toHex(), 0, 300);
+  return Transaction.fromHex(built.hex).virtualSize() + 1;
+}
+
+/** The exact funding that pays the notification at this rate, no change. */
+export function fundingRequired(config: Config, rate: number): number {
+  return NOTIFICATION_SATS +
+    Math.ceil(rate * notificationVbytes(config, false));
+}
+
+/**
+ * The fee in sats for a funding output of this value at this rate. Without
+ * change the whole remainder is fee, so the rate only sets a minimum.
+ */
+export function feeForRate(config: Config, value: number, rate: number): number {
+  const withChange = Math.ceil(rate * notificationVbytes(config, true));
+  if (value - NOTIFICATION_SATS - withChange >= 330) return withChange;
+  const without = Math.ceil(rate * notificationVbytes(config, false));
+  requireCondition(
+    value - NOTIFICATION_SATS >= without,
+    `The funding covers at most ${Math.floor(
+      (value - NOTIFICATION_SATS) / notificationVbytes(config, false),
+    )} sat/vB; send more or choose a lower fee`,
+  );
+  return value - NOTIFICATION_SATS;
 }
 
 // The output the dashboard offers for funding: confirmed and within limits.
@@ -333,6 +428,7 @@ export function approve(
     signature: text,
     createdAt: new Date().toISOString(),
   });
+  store.remove(REAPPROVAL_NOTICE);
 }
 
 export function connectPaired(store: Store, config: Config): Promise<DojoApi> {

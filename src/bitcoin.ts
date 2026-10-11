@@ -43,6 +43,9 @@ export function receiver(code: string, networkName: NetworkName) {
   return bip47.fromBase58(code, profiles[networkName].bitcoin);
 }
 
+export const NOTIFICATION_SATS = 546;
+export const MAX_FEE_RATE = 1000;
+
 // Samourai's SegWit flag: byte 79 of the 80-byte payment code body.
 const SEGWIT_FEATURE_BYTE = 79;
 
@@ -83,19 +86,6 @@ export function deriveAddress(config: Config, index: number): string {
     .getPaymentAddress(sender, index, "p2wpkh");
 }
 
-// Hex public key of the address deriveAddress returns at this index.
-export function derivePaymentPubkey(config: Config, index: number): string {
-  requireCondition(
-    Number.isSafeInteger(index) && index >= 0 && index < ISSUANCE_LIMIT,
-    "Index outside the development issuance range",
-  );
-  const sender = createWallet(config.seedHex, config.network).sender;
-  return Buffer.from(
-    receiver(config.merchantCode, config.network)
-      .derivePaymentPublicKey(sender, index),
-  ).toString("hex");
-}
-
 export function buildNotification(
   config: Config,
   fundingHex: string,
@@ -112,9 +102,8 @@ export function buildNotification(
     "Invalid funding output index",
   );
   requireCondition(
-    Number.isSafeInteger(feeSats) &&
-      feeSats >= 200 && feeSats <= 10000,
-    "Development fee must be between 200 and 10000 sats",
+    Number.isSafeInteger(feeSats) && feeSats > 0,
+    "The fee must be a whole number of sats",
   );
 
   const network = profiles[config.network].bitcoin;
@@ -133,9 +122,17 @@ export function buildNotification(
     "Development build refuses funding outputs above 1000000 sats",
   );
 
-  const notificationValue = 546n;
-  const changeValue = output.value - BigInt(feeSats) - notificationValue;
-  requireCondition(changeValue >= 330n, "Insufficient funding and change");
+  // The notification output goes to the merchant's notification address,
+  // which BIP47 defines as P2PKH; 546 sats is that output type's dust limit.
+  const notificationValue = BigInt(NOTIFICATION_SATS);
+  const leftover = output.value - BigInt(feeSats) - notificationValue;
+  requireCondition(
+    leftover >= 0n,
+    "The funding output does not cover the notification and its fee",
+  );
+  // Change below the P2WPKH dust limit is added to the fee instead.
+  const withChange = leftover >= 330n;
+  const changeValue = withChange ? leftover : 0n;
   requireCondition(wallet.funding.privateKey, "Missing funding private key");
 
   const outpoint = Buffer.alloc(36);
@@ -168,7 +165,7 @@ export function buildNotification(
     value: notificationValue,
   });
   psbt.addOutput({ script: dataScript, value: 0n });
-  psbt.addOutput({ address: changeAddress, value: changeValue });
+  if (withChange) psbt.addOutput({ address: changeAddress, value: changeValue });
   psbt.signInput(0, wallet.funding);
 
   requireCondition(
@@ -181,13 +178,15 @@ export function buildNotification(
 
   psbt.finalizeAllInputs();
   const tx = psbt.extractTransaction();
-  const feeRate = feeSats / tx.virtualSize();
-  requireCondition(feeRate <= 100, "Development fee-rate limit exceeded");
+  const fee = Number(output.value - notificationValue - changeValue);
+  const feeRate = fee / tx.virtualSize();
+  requireCondition(feeRate >= 1, "The fee is below 1 sat/vB");
+  requireCondition(feeRate <= MAX_FEE_RATE, "The fee rate is implausibly high");
 
   return {
     fundingHex,
     vout,
-    feeSats,
+    feeSats: fee,
     txid: tx.getId(),
     hex: tx.toHex(),
     recipient: merchant.getNotificationAddress(),

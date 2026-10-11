@@ -19,7 +19,8 @@ dashboard walks through every step:
    then claims the dispenser's PayNym with its SegWit payment code and
    follows your PayNym, in the background over Tor.
 2. Paste the pairing of the Dojo your merchant wallet uses.
-3. Send about 20,000 sats to the address shown. Funding is detected.
+3. Pick a miner fee and send the exact amount shown (about 5,700 sats at
+   25 sat/vB). Funding is detected.
 4. Create and broadcast the one-time notification transaction.
 5. Pay a test address and check that your merchant wallet receives it.
 6. Sign the approval text in your merchant wallet and paste the signature.
@@ -95,7 +96,7 @@ Dojo pairing network labels are operator assertions, not chain proofs.
 The paired Dojo is assumed to be the one the merchant wallet uses.
 
 Before an address can be issued, it is registered with that Dojo through
-a first `active=` lookup of its payment public key. Dojo then tracks it,
+a first `active=` lookup of its P2WPKH address. Dojo then tracks it,
 and a later `new=` declaration by the receiving wallet (as Ashigaru's
 Resync Paynym sends) cannot suppress its history. Pairing registers the
 first addresses immediately. `serve` keeps three addresses registered
@@ -170,8 +171,37 @@ No Auth47 login, PayNym profile caching,
 automatic directory selection, customer-payment monitoring, funding-wallet
 sweep command, or fee-bump command is included.
 
-Funding uses one confirmed output of at most 1,000,000 sats. The fee is
-suggested from the Dojo's estimate and can be changed.
+Funding uses one confirmed output of at most 1,000,000 sats.
+
+## SegWit only
+
+Tekiya uses SegWit forms throughout: the dispenser's payment code carries
+the SegWit flag, merchant codes are stored in SegWit form (either form may
+be pasted), customer, funding and change addresses are P2WPKH, and only
+P2WPKH addresses are registered with the Dojo. An installation that stored
+a legacy merchant code switches at startup and asks for the approval once
+more, because its text names the code.
+
+The one exception is set by BIP47 itself: the merchant's notification
+address is P2PKH. The 546-sat notification output must go there for the
+merchant wallet to see the connection, and the wallet signs the approval
+with that address's key.
+
+## Fees
+
+The notification transaction has two outputs, 546 sats to the merchant's
+notification address and the OP_RETURN payload, and is about 206 vB. The
+dashboard asks for exactly enough to pay it at the chosen rate with no
+change. Fee presets follow the Dojo's estimates but never go below 25
+sat/vB; a custom rate has the same floor. Extra funding returns to the
+dispenser's wallet as change; change under the dust limit is added to the
+fee.
+
+## Planned: dashboard redesign
+
+- Choose mainnet or testnet4 at the start of setup instead of through
+  `NYM_NETWORK`. Each network keeps separate state, so the choice belongs
+  before the merchant wallet is connected.
 
 Do not use the merchant payment code or dispenser code as a Bitcoin
 payment address. Customer payments go to the derived destination address.

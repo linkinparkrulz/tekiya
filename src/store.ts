@@ -47,6 +47,13 @@ export class Store {
         address TEXT UNIQUE NOT NULL,
         registered_at TEXT NOT NULL
       );
+      -- Totals received by an allocated address, as last seen by the Dojo.
+      CREATE TABLE IF NOT EXISTS received (
+        idx INTEGER PRIMARY KEY,
+        confirmed_sats INTEGER NOT NULL,
+        unconfirmed_sats INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       -- First confirmed payment observed for an allocated index.
       CREATE TABLE IF NOT EXISTS payments (
         idx INTEGER PRIMARY KEY,
@@ -110,10 +117,17 @@ export class Store {
     ).run(index, address, new Date().toISOString());
   }
 
-  recordPayment(index: number, txid: string, blockHeight: number): void {
-    this.db.prepare(
+  // True when this is the first confirmed payment recorded for the index.
+  recordPayment(index: number, txid: string, blockHeight: number): boolean {
+    return this.db.prepare(
       "INSERT OR IGNORE INTO payments VALUES (?, ?, ?, ?)",
-    ).run(index, txid, blockHeight, new Date().toISOString());
+    ).run(index, txid, blockHeight, new Date().toISOString()).changes > 0;
+  }
+
+  recordReceived(index: number, confirmed: number, unconfirmed: number): void {
+    this.db.prepare(
+      "INSERT OR REPLACE INTO received VALUES (?, ?, ?, ?)",
+    ).run(index, confirmed, unconfirmed, new Date().toISOString());
   }
 
   halt(reason: string): void {

@@ -10,7 +10,8 @@ import { escape, page, sendHtml } from "./html.js";
 import type { Monitor } from "./monitor.js";
 import {
   approve, broadcastNotification, confirmedNotification, connectPaired,
-  initialize, issueTestAddress, normalizeOnion, pairDojo, parsePairing,
+  FEE_CHOICE, FeeChoice, chosenRate, feeForRate, initialize,
+  issueTestAddress, normalizeOnion, pairDojo, parsePairing,
   prepareNotification,
 } from "./setup.js";
 import { syncDojo } from "./registrar.js";
@@ -93,6 +94,13 @@ function detectOnion(): string | undefined {
   }
 }
 
+function feeChoice(form: URLSearchParams): FeeChoice {
+  const preset = form.get("preset") ?? "standard";
+  return FeeChoice.parse(preset === "custom"
+    ? { preset, customRate: Number(form.get("customRate")) }
+    : { preset });
+}
+
 function describe(error: unknown): string {
   if (error instanceof z.ZodError) {
     return error.issues.map(issue => issue.message).join("; ");
@@ -143,13 +151,22 @@ export function serveAdmin(
     },
     "/setup/pair": pair,
     "/settings/pair": pair,
+    "/setup/fee": async form => {
+      store.replace(FEE_CHOICE, feeChoice(form));
+    },
     "/setup/notification": async form => {
       const config = requireConfig();
+      const choice = feeChoice(form);
+      store.replace(FEE_CHOICE, choice);
+      const txid = form.get("txid") ?? "";
+      const vout = Number(form.get("vout"));
+      const utxo = monitor.state.funding?.utxos
+        .find(item => item.txid === txid && item.vout === vout);
+      requireCondition(utxo, "That funding output is no longer available");
+      const rate = chosenRate(choice, monitor.state.funding?.fees);
       await prepareNotification(
         store, config, await connectPaired(store, config),
-        form.get("txid") ?? "",
-        Number(form.get("vout")),
-        Number(form.get("fee")),
+        txid, vout, feeForRate(config, utxo.value, rate),
       );
     },
     "/setup/broadcast": async () => {

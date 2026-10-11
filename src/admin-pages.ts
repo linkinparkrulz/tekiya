@@ -11,9 +11,11 @@ import {
   bitcoinUri, escape, formatTime, page, qrSvg,
 } from "./html.js";
 import type { MonitorState } from "./monitor.js";
+import { NOTIFICATION_SATS } from "./bitcoin.js";
 import {
-  MAX_FUNDING_SATS, TEST_REQUEST_ID, broadcastRecorded, suggestFee,
-  usableFunding,
+  FEE_CHOICE, FeeChoice, MAX_FUNDING_SATS, MIN_FEE_RATE, REAPPROVAL_NOTICE,
+  TEST_REQUEST_ID, broadcastRecorded, chosenRate, feePresets,
+  fundingRequired, usableFunding,
 } from "./setup.js";
 import { paynymStatus } from "./paynym.js";
 import { Store } from "./store.js";
@@ -119,31 +121,71 @@ ${dojoForm("/setup/pair", "Connect Dojo")}
 same network.</p>`;
 }
 
-function fundStep(view: View, config: Config): string {
+function feeDial(
+  config: Config,
+  fees: Record<string, number>,
+  choice: FeeChoice | undefined,
+  // When set, rates the funding cannot pay for are disabled.
+  available?: number,
+): string {
+  const presets = feePresets(fees);
+  const affordable = (rate: number) =>
+    available === undefined || available >= fundingRequired(config, rate);
+  const selectedRate = chosenRate(choice, fees);
+  let selected = choice?.preset ?? "standard";
+  if (!affordable(selectedRate)) {
+    selected = [...presets].reverse().find(p => affordable(p.rate))?.id
+      ?? "custom";
+  }
+  const option = (id: string, label: string, detail: string, ok: boolean) =>
+    `<label class="preset${ok ? "" : " disabled"}">
+<input type="radio" name="preset" value="${id}"${id === selected ? " checked" : ""}${
+  ok ? "" : " disabled"}>
+<span><strong>${escape(label)}</strong> <span class="muted">${
+  escape(detail)}</span></span></label>`;
+  const custom = choice?.preset === "custom" && choice.customRate
+    ? choice.customRate : presets[1]?.rate ?? MIN_FEE_RATE;
+  return `<fieldset class="dial"><legend>Miner fee</legend>
+${presets.map(p => option(
+    p.id, p.label,
+    `${p.rate} sat/vB · ${p.hint} · ${units(fundingRequired(config, p.rate))} total`,
+    affordable(p.rate),
+  )).join("")}
+<label class="preset"><input type="radio" name="preset" value="custom"${
+  selected === "custom" ? " checked" : ""}>
+<span><strong>Custom</strong>
+<input type="number" name="customRate" min="${MIN_FEE_RATE}" max="1000"
+  value="${custom}" aria-label="Custom fee rate"> sat/vB</span></label>
+<p class="hint">Never below ${MIN_FEE_RATE} sat/vB; higher when your Dojo
+estimates more.</p></fieldset>`;
+}
+
+function fundStep(view: View, store: Store, config: Config): string {
   const address = createWallet(config.seedHex, config.network).fundingAddress;
-  const suggested = 20000;
   const funding = view.monitor.funding;
+  const fees = funding?.fees ?? {};
+  const choice = store.get(FEE_CHOICE, FeeChoice);
+  const rate = chosenRate(choice, fees);
+  const amount = fundingRequired(config, rate);
   const usable = funding && usableFunding(funding.utxos);
   const unconfirmed = funding?.utxos.filter(utxo => utxo.confirmations === 0);
   const tooLarge = funding?.utxos.filter(utxo => utxo.value > MAX_FUNDING_SATS);
 
-  let status: string;
   if (usable) {
-    const fee = suggestFee(funding.feeRate);
-    status = `<div class="notice">Received ${units(usable.value)}
-(confirmed).</div>
+    return `<h2>Fund the dispenser</h2>
+<div class="notice">Received ${units(usable.value)} (confirmed).</div>
+<p>Choose the miner fee for the notification transaction. It sends
+${NOTIFICATION_SATS} sats to your wallet's notification address.</p>
 <form method="post" action="/setup/notification" class="stack">
 <input type="hidden" name="txid" value="${escape(usable.txid)}">
 <input type="hidden" name="vout" value="${escape(usable.vout)}">
-<div><label for="fee">Miner fee (sats)</label>
-<input type="number" id="fee" name="fee" min="200" max="10000"
-  value="${fee}" required>
-<p class="hint">Suggested from your Dojo's fee estimate${funding.feeRate
-    ? ` (${escape(funding.feeRate)} sat/vB)` : ""}. The transaction is about
-237 vB.</p></div>
+${feeDial(config, fees, choice, usable.value)}
 <button type="submit">Create notification transaction</button>
 </form>`;
-  } else if (unconfirmed?.length) {
+  }
+
+  let status: string;
+  if (unconfirmed?.length) {
     status = `<div class="notice">Payment seen (${units(
       unconfirmed[0]?.value ?? 0)}). Waiting for one confirmation…</div>`;
   } else if (tooLarge?.length) {
@@ -153,14 +195,20 @@ to ${units(MAX_FUNDING_SATS)}. Send a smaller amount to the same address.</div>`
     status = '<div class="notice">Waiting for a payment to this address…</div>';
   }
 
+  const uri = bitcoinUri(address, amount);
   return `<h2>Fund the dispenser</h2>
-<p>Tekiya made a small wallet of its own. It needs a little bitcoin to send
-one setup transaction to your wallet. Send about
-<strong>${units(suggested)}</strong> to:</p>
-<a class="qr" href="${escape(bitcoinUri(address, suggested))}">${
-  qrSvg(bitcoinUri(address, suggested), "Funding address QR code")}</a>
+<p>Tekiya made a small wallet of its own to send one setup transaction to
+your wallet. Send exactly <strong class="copyable">${units(amount)}</strong>:
+${NOTIFICATION_SATS} sats for your wallet plus ${
+  units(amount - NOTIFICATION_SATS)} miner fee at ${rate} sat/vB. Anything
+extra stays in the dispenser's wallet as change.</p>
+<a class="qr" href="${escape(uri)}">${qrSvg(uri, "Funding QR code")}</a>
 <div class="address">${escape(address)}</div>
 ${status}
+<form method="post" action="/setup/fee" class="stack">
+${feeDial(config, fees, choice)}
+<button class="secondary" type="submit">Update amount</button>
+</form>
 <div class="actions">${checkButton()}</div>
 ${syncLine(view.monitor)}`;
 }
@@ -219,11 +267,13 @@ yourself) to prove your wallet controls it.</p>
 ${syncLine(view.monitor)}`;
 }
 
-function signStep(config: Config, pending: Pending): string {
+function signStep(store: Store, config: Config, pending: Pending): string {
   const statement = identityStatement(config, pending);
   const signer = receiver(config.merchantCode, config.network)
     .getNotificationAddress();
+  const reapproval = store.get(REAPPROVAL_NOTICE, z.object({ reason: z.string() }));
   return `<h2>Approve</h2>
+${reapproval ? `<div class="notice">${escape(reapproval.reason)}</div>` : ""}
 <div class="notice">Test payment confirmed. Make sure your merchant wallet
 shows it and that you have spent it before approving.</div>
 <p>In your merchant wallet, sign this exact text with your PayNym (its
@@ -249,7 +299,29 @@ const Row = z.object({
   registered: z.number().int(),
   txid: z.string().nullable(),
   block_height: z.number().int().nullable(),
+  confirmed_sats: z.number().int().nullable(),
+  unconfirmed_sats: z.number().int().nullable(),
 });
+
+// Leading and trailing characters, as wallets display addresses; the full
+// address is one click away.
+function shortAddress(address: string): string {
+  const short = address.length > 20
+    ? `${address.slice(0, 10)}…${address.slice(-6)}`
+    : address;
+  return `<details class="addr"><summary class="mono" title="${
+    escape(address)}">${escape(short)}</summary>
+<span class="mono copyable">${escape(address)}</span></details>`;
+}
+
+function receivedCell(confirmed: number | null, pending: number | null): string {
+  if (confirmed === null) return '<span class="muted">checking…</span>';
+  const total = confirmed + (pending ?? 0);
+  if (total === 0) return '<span class="muted">nothing yet</span>';
+  return `<span class="copyable nowrap">${units(confirmed)}</span>${pending
+    ? `<br><span class="muted nowrap">+${units(pending)} pending</span>`
+    : ""}`;
+}
 
 function requestLabel(id: string): string {
   // Web nonces grant access to the customer's page; show only their kind.
@@ -283,27 +355,28 @@ function liveView(view: View, config: Config): string {
 
   const rows = z.array(Row).parse(store.db.prepare(`
     SELECT a.idx, a.request_id, a.address, a.amount_sats, a.created_at,
-      r.idx IS NOT NULL AS registered, p.txid, p.block_height
+      r.idx IS NOT NULL AS registered, p.txid, p.block_height,
+      v.confirmed_sats, v.unconfirmed_sats
     FROM allocations a
     LEFT JOIN registrations r ON r.idx = a.idx
     LEFT JOIN payments p ON p.idx = a.idx
+    LEFT JOIN received v ON v.idx = a.idx
     ORDER BY a.idx DESC
   `).all());
 
   const table = `<div class="table-wrap"><table>
-<thead><tr><th>#</th><th>Request</th><th>Address</th><th>Amount</th>
-<th>Issued</th><th>Dojo</th><th>Payment</th></tr></thead><tbody>
+<thead><tr><th>#</th><th>Address</th><th>Received</th><th>Requested</th>
+<th>Request</th><th>Issued</th><th>Dojo</th></tr></thead><tbody>
 ${rows.map(row => `<tr>
 <td>${row.idx}</td>
-<td>${escape(requestLabel(row.request_id))}</td>
-<td class="mono">${escape(row.address)}</td>
+<td>${shortAddress(row.address)}</td>
+<td>${receivedCell(row.confirmed_sats, row.unconfirmed_sats)}${row.txid
+    ? `<br><span class="muted nowrap">first in block ${
+      escape(row.block_height)}</span>` : ""}</td>
 <td class="nowrap">${row.amount_sats ? units(row.amount_sats) : "—"}</td>
+<td>${escape(requestLabel(row.request_id))}</td>
 <td class="nowrap">${escape(formatTime(row.created_at))}</td>
 <td>${badge(Boolean(row.registered), "registered", "pending")}</td>
-<td>${row.txid
-    ? `${badge(true, "confirmed", "")} <span class="muted">block ${
-      escape(row.block_height)}</span>`
-    : '<span class="muted">none confirmed</span>'}</td>
 </tr>`).join("")}
 </tbody></table></div>`;
 
@@ -413,12 +486,12 @@ ${view.error ? `<div class="notice bad">${escape(view.error)}</div>` : ""}`;
   switch (step) {
     case "merchant": body = merchantStep(view); break;
     case "dojo": body = dojoStep(view); break;
-    case "fund": body = config ? fundStep(view, config) : ""; break;
+    case "fund": body = config ? fundStep(view, store, config) : ""; break;
     case "broadcast": body = pending ? broadcastStep(pending) : ""; break;
     case "confirm": body = pending ? confirmStep(view, pending) : ""; break;
     case "test": body = testStep(); break;
     case "test-wait": body = testWaitStep(view, store); break;
-    default: body = config && pending ? signStep(config, pending) : "";
+    default: body = config && pending ? signStep(store, config, pending) : "";
   }
 
   const index = PROGRESS.findIndex(([, steps]) => steps.includes(step));
