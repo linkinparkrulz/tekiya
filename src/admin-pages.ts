@@ -59,6 +59,8 @@ export interface View {
   readonly monitor: MonitorState;
   readonly detectedOnion: string | undefined;
   readonly error?: string;
+  // Fields from a form that failed, shown again; never secrets.
+  readonly draft?: Record<string, string>;
 }
 
 const units = (sats: number): string =>
@@ -473,9 +475,13 @@ function moneroCard(view: View): string {
   const { store, monitor } = view;
   const settings = store.get(MONERO, MoneroSettings);
   const network = moneroNetwork(view.network);
+  const draft = view.draft ?? {};
+  const field = (name: string, saved: string | number | undefined) =>
+    escape(draft[name] ?? saved ?? "");
 
   if (!settings?.enabled) {
-    return `<details class="card"><summary>Monero
+    return `<details class="card"${"viewKey" in draft || "address" in draft
+      ? " open" : ""}><summary>Monero
 (optional)</summary>
 <p>Accept Monero too. Tekiya runs a view-only wallet from your primary
 address and private view key: it gives each payment a fresh subaddress and
@@ -488,7 +494,7 @@ again reuses that wallet.</p>` : ""}
 <form method="post" action="/monero/enable" class="stack">
 <div><label for="xmrAddress">Primary address (${escape(network)})</label>
 <input type="text" id="xmrAddress" name="address" autocomplete="off"
-  value="${escape(settings?.address ?? "")}" required
+  value="${field("address", settings?.address)}" required
   placeholder="${network === "mainnet" ? "4…" : "5…"}"></div>
 <div><label for="viewKey">Private view key</label>
 <input type="text" id="viewKey" name="viewKey" autocomplete="off" required
@@ -497,7 +503,7 @@ again reuses that wallet.</p>` : ""}
 spend key or seed.</p></div>
 <div><label for="node">Monero node</label>
 <input type="text" id="node" name="node" autocomplete="off" required
-  value="${escape(settings?.node ?? "")}" placeholder="${network === "mainnet"
+  value="${field("node", settings?.node)}" placeholder="${network === "mainnet"
     ? "abc…xyz.onion:18081" : "stagenet.community.rino.io:38081"}">
 <p class="hint">${network === "mainnet"
     ? "A .onion node (reached through Tor) or one on your own machine or network."
@@ -506,14 +512,15 @@ spend key or seed.</p></div>
 <div><label for="restoreHeight">Restore height
 <span class="muted">(optional)</span></label>
 <input type="number" id="restoreHeight" name="restoreHeight" min="0"
-  value="${settings?.restoreHeight ?? ""}">
+  value="${field("restoreHeight", settings?.restoreHeight)}">
 <p class="hint">The wallet's creation height; speeds up the first scan.</p></div>
 <div><label for="account">Account</label>
 <input type="number" id="account" name="account" min="1" max="49"
-  value="${settings?.account ?? 1}">
-<p class="hint">Tekiya only uses this account of your wallet, so it never
-hands out addresses your wallet shows elsewhere. Keep the default unless
-you already use account 1.</p></div>
+  value="${field("account", settings?.account ?? 1)}">
+<p class="hint">Payments to Tekiya land in this account of your wallet; in
+Feather, find it in the account list. Account 0 is your wallet's own, so
+Tekiya uses a separate one and never hands out an address your wallet also
+shows. Keep 1 unless you already use it.</p></div>
 <button type="submit">Enable Monero</button>
 </form></details>`;
   }

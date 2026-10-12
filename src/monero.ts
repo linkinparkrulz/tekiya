@@ -270,7 +270,8 @@ export async function enableMonero(
     enabledAt: previous?.enabledAt ?? new Date().toISOString(),
   };
 
-  await setDaemon(rpc, settings.node, settings.network);
+  // The wallet must be open before anything else, the node included:
+  // monero-wallet-rpc answers "No wallet file" otherwise.
   try {
     await rpc("generate_from_keys", {
       filename: settings.walletFile,
@@ -291,6 +292,7 @@ export async function enableMonero(
       filename: settings.walletFile, password: settings.walletPassword,
     });
   }
+  await setDaemon(rpc, settings.node, settings.network);
 
   const Address = z.object({ address: z.string() });
   requireCondition(
@@ -319,10 +321,10 @@ async function ensureOpen(rpc: MoneroRpc, settings: MoneroSettings) {
     await rpc("get_height");
   } catch (error) {
     if (!(error instanceof MoneroRpcError)) throw error;
-    await setDaemon(rpc, settings.node, settings.network);
     await rpc("open_wallet", {
       filename: settings.walletFile, password: settings.walletPassword,
     });
+    await setDaemon(rpc, settings.node, settings.network);
   }
 }
 

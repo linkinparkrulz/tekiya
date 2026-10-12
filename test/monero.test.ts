@@ -36,6 +36,11 @@ before(async () => {
     const reply = (result: unknown) => res.end(JSON.stringify({ id: "0", result }));
     const fail = (code: number, message: string) =>
       res.end(JSON.stringify({ id: "0", error: { code, message } }));
+    // Like monero-wallet-rpc: everything but creating or opening a wallet
+    // needs an open wallet.
+    if (!["generate_from_keys", "open_wallet"].includes(method) && !wallet.open) {
+      return fail(-13, "No wallet file");
+    }
     switch (method) {
       case "set_daemon": wallet.daemon = params; return reply({});
       case "generate_from_keys": {
@@ -266,6 +271,23 @@ test("the API creates and reports Monero requests", async () => {
     );
   } finally {
     api.close();
+    store.close();
+  }
+});
+
+test("a restarted wallet service is reopened before use", async () => {
+  const store = new Store(":memory:");
+  try {
+    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
+    wallet.open = undefined;
+    wallet.daemon = undefined;
+    wallet.calls = [];
+    await allocateMonero(store, "order_xmr_restart_01", 0);
+    const open = wallet.calls.indexOf("open_wallet");
+    const daemon = wallet.calls.indexOf("set_daemon");
+    assert.ok(open >= 0 && daemon > open, wallet.calls.join(","));
+    assert.ok(wallet.daemon);
+  } finally {
     store.close();
   }
 });

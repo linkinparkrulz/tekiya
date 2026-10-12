@@ -224,13 +224,15 @@ export function serveAdmin(
     "/paynym": () => monitor.registerPaynym(),
   };
 
-  const render = (error?: string): string => dashboard({
-    store,
-    network,
-    monitor: monitor.state,
-    detectedOnion: detectOnion(),
-    ...(error ? { error } : {}),
-  });
+  const render = (error?: string, draft?: Record<string, string>): string =>
+    dashboard({
+      store,
+      network,
+      monitor: monitor.state,
+      detectedOnion: detectOnion(),
+      ...(error ? { error } : {}),
+      ...(draft ? { draft } : {}),
+    });
 
   const server = createServer(async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
@@ -274,10 +276,15 @@ export function serveAdmin(
             render("Request blocked: it did not come from this page."));
           return;
         }
+        const form = await readForm(req);
         try {
-          await action(await readForm(req));
+          await action(form);
         } catch (error) {
-          sendHtml(res, 400, render(describe(error)));
+          // Keep what was typed for another try; secrets are never echoed.
+          const draft = Object.fromEntries(
+            [...form].filter(([key]) => !/key|signature|pairing/i.test(key)),
+          );
+          sendHtml(res, 400, render(describe(error), draft));
           return;
         }
         res.setHeader("Location", "/");

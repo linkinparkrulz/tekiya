@@ -72,6 +72,8 @@ view key is passed to the wallet once and never stored by Tekiya. The
 wallet cannot spend. Each payment gets a fresh subaddress in a dedicated
 account (default 1), so Tekiya never hands out an address the merchant's
 wallet shows elsewhere; Monero wallets find payments to it on their own.
+In Feather, payments to Tekiya appear under that account in the account
+list, not in account 0.
 Payments count as paid after 10 confirmations, and issuing pauses after 150
 unused subaddresses in a row.
 
