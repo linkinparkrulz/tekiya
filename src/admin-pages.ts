@@ -15,6 +15,7 @@ import { NOTIFICATION_SATS } from "./bitcoin.js";
 import {
   FEE_CHOICE, FeeChoice, MAX_FUNDING_SATS, MIN_FEE_RATE, REAPPROVAL_NOTICE,
   TEST_REQUEST_ID, broadcastRecorded, chosenRate, feePresets,
+  notificationConfirmed,
   fundingRequired, usableFunding,
 } from "./setup.js";
 import { paynymStatus } from "./paynym.js";
@@ -33,11 +34,13 @@ export function currentStep(store: Store, monitor: MonitorState): Step {
   if (!config) return "merchant";
   if (!store.get("pairing", Pairing)) return "dojo";
   if (!store.get("notification", Pending)) return "fund";
-  const confirmations = monitor.notificationConfirmations;
-  if (!broadcastRecorded(store) && confirmations === undefined) {
-    return "broadcast";
+  if (!notificationConfirmed(store)) {
+    const confirmations = monitor.notificationConfirmations;
+    if (!broadcastRecorded(store) && confirmations === undefined) {
+      return "broadcast";
+    }
+    if (!confirmations) return "confirm";
   }
-  if (!confirmations) return "confirm";
   if (!store.findAllocation(TEST_REQUEST_ID)) return "test";
   if (store.lastConfirmedPayment() < 0) return "test-wait";
   if (!store.get("approval", Approval)) return "sign";

@@ -67,8 +67,9 @@ export function describeFailure(
         "may be offline; Tekiya will retry.");
     case 28:
       return new TorRequestError("timeout",
-        `Timed out over Tor reaching ${host}. Onion services can be slow; ` +
-        "Tekiya will retry.");
+        `Timed out over Tor reaching ${host}. If this persists while the ` +
+        "service is up, check that this machine's clock is correct and " +
+        "look at docker compose logs tor; Tekiya will retry.");
     default:
       return new TorRequestError("failed",
         `Tor request to ${host} failed (curl ${exitCode ?? "killed"}${
@@ -143,8 +144,11 @@ export function torJson(
       "--proxy", proxy,
       "--noproxy", "",
       "--proto", "=http",
-      "--connect-timeout", String(options.connectTimeout ?? 30),
-      "--max-time", String(options.maxTime ?? 90),
+      // Reaching an onion service (descriptor lookup and rendezvous) is
+      // part of connecting and often takes over 30 s, longer after Tor
+      // has just started.
+      "--connect-timeout", String(options.connectTimeout ?? 90),
+      "--max-time", String(options.maxTime ?? 150),
       "--max-filesize", "2097152",
       "--silent", "--show-error",
       "--write-out", "\n%{http_code}",

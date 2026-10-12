@@ -1,7 +1,8 @@
 import { Config, Pairing, Pending, type NetworkName } from "./config.js";
 import { syncDojo, type SyncResult } from "./registrar.js";
 import {
-  connectPaired, notificationStatus, observeFunding,
+  connectPaired, notificationConfirmed, notificationStatus, observeFunding,
+  recordNotificationConfirmed,
   type FundingObservation,
 } from "./setup.js";
 import { paynymComplete, registerPaynym } from "./paynym.js";
@@ -129,10 +130,13 @@ export class Monitor {
       const pending = this.store.get("notification", Pending);
       if (!pending) {
         this.state.funding = await observeFunding(config, api);
-      } else if (!this.state.notificationConfirmations) {
+      } else if (!notificationConfirmed(this.store)) {
         try {
           this.state.notificationConfirmations =
             (await notificationStatus(api, pending)).confirmations;
+          if (this.state.notificationConfirmations > 0) {
+            recordNotificationConfirmed(this.store);
+          }
         } catch {
           delete this.state.notificationConfirmations;
         }

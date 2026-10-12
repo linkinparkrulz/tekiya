@@ -10,7 +10,8 @@ import { currentStep } from "../src/admin-pages.js";
 import { sameOrigin } from "../src/admin.js";
 import {
   FeeChoice, approve, chosenRate, feeForRate, feePresets, fundingRequired,
-  initialize, normalizeOnion, parsePairing, usableFunding,
+  initialize, normalizeOnion, notificationConfirmed, parsePairing,
+  recordNotificationConfirmed, usableFunding,
 } from "../src/setup.js";
 import { Store } from "../src/store.js";
 
@@ -178,4 +179,31 @@ test("approval accepts Ashigaru's signed-message block and BIP47 suffix", () => 
   assert.throws(() => s.run(sign(`${statement}\n`)), /does not match/);
   assert.equal(s.store.get("approval", Approval), undefined);
   s.store.close();
+});
+
+test("setup does not go back when the Dojo is unreachable after a restart", () => {
+  const store = new Store(":memory:");
+  try {
+    const code = createWallet("22".repeat(64), "testnet4").sender.toBase58();
+    const config = initialize(store, "testnet4", code, onion);
+    store.insert("pairing", { network: "testnet4", baseUrl: `${dojo}/test/v2/`, apikey: "k" });
+    const funding = new Transaction();
+    funding.addInput(Buffer.alloc(32, 7), 0);
+    funding.addOutput(createWallet(config.seedHex, "testnet4").fundingScript, 50000n);
+    const pending = buildNotification(config, funding.toHex(), 0, 1000);
+    store.insert("notification", pending);
+
+    // Nothing known yet: the broadcast step.
+    assert.equal(currentStep(store, {}), "broadcast");
+    // Seen confirmed once, then Tekiya restarts with no Dojo answer.
+    recordNotificationConfirmed(store);
+    assert.equal(currentStep(store, {}), "test");
+    // An installation that is further along never shows earlier steps.
+    store.remove("notification-confirmed");
+    store.insert("approval", { txid: pending.txid, signature: "s", createdAt: "now" });
+    assert.notEqual(currentStep(store, {}), "broadcast");
+    assert.ok(notificationConfirmed(store));
+  } finally {
+    store.close();
+  }
 });

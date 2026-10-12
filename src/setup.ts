@@ -309,6 +309,31 @@ export async function prepareNotification(
 
 const Broadcast = z.object({ txid: z.string(), at: z.string() });
 
+const Confirmed = z.object({ txid: z.string(), at: z.string() });
+
+/**
+ * Whether the notification is known to be confirmed, without asking the
+ * Dojo: recorded when first seen confirmed, and implied by later setup
+ * steps, which all required it. Setup never goes backwards on a restart
+ * while the Dojo is unreachable.
+ */
+export function notificationConfirmed(store: Store): boolean {
+  const pending = store.get("notification", Pending);
+  if (!pending) return false;
+  return store.get("notification-confirmed", Confirmed)?.txid === pending.txid ||
+    store.findAllocation(TEST_REQUEST_ID) !== undefined ||
+    store.get("approval", Approval) !== undefined;
+}
+
+export function recordNotificationConfirmed(store: Store): void {
+  const pending = store.get("notification", Pending);
+  if (pending && !notificationConfirmed(store)) {
+    store.replace("notification-confirmed", {
+      txid: pending.txid, at: new Date().toISOString(),
+    });
+  }
+}
+
 export function broadcastRecorded(store: Store): boolean {
   const pending = store.get("notification", Pending);
   return Boolean(pending &&
@@ -361,11 +386,13 @@ export async function confirmedNotification(
   const pending = store.get("notification", Pending);
   requireCondition(pending, "Prepare a notification first");
   reconstruct(config, pending);
+  if (notificationConfirmed(store)) return pending;
   const { confirmations } = await notificationStatus(api, pending);
   requireCondition(
     confirmations > 0,
     "The notification transaction is not confirmed yet",
   );
+  recordNotificationConfirmed(store);
   return pending;
 }
 
