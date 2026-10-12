@@ -11,6 +11,9 @@ export const DIRECTORY =
 interface RequestOptions {
   form?: Record<string, string>;
   token?: string;
+  // Seconds; defaults suit slow onion services.
+  connectTimeout?: number;
+  maxTime?: number;
 }
 
 function proxyAddress(): string {
@@ -27,11 +30,86 @@ function proxyAddress(): string {
   return value;
 }
 
+export type TorFailure =
+  | "tor_unreachable" | "onion_unreachable" | "timeout" | "unauthorized"
+  | "not_found" | "http_error" | "invalid_response" | "failed";
+
+/** A failed request over Tor, with a message that says what to do. */
+export class TorRequestError extends Error {
+  constructor(
+    readonly reason: TorFailure,
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+  }
+}
+
+// Curl exit codes: 5/7 proxy unreachable, 28 timeout, 97 SOCKS failure
+// (the onion service could not be reached through Tor).
+export function describeFailure(
+  host: string,
+  proxy: string,
+  exitCode: number | null,
+  stderr: string,
+): TorRequestError {
+  const detail = stderr.split("\n")[0]?.replace(/^curl: /, "").slice(0, 160);
+  switch (exitCode) {
+    case 5:
+    case 7:
+      return new TorRequestError("tor_unreachable",
+        `Tor is not reachable at ${new URL(proxy).host}. Is the tor ` +
+        "container running and finished starting? (docker compose ps; " +
+        "docker compose logs tor)");
+    case 97:
+      return new TorRequestError("onion_unreachable",
+        `Tor is running but could not reach ${host}. The onion service ` +
+        "may be offline; Tekiya will retry.");
+    case 28:
+      return new TorRequestError("timeout",
+        `Timed out over Tor reaching ${host}. Onion services can be slow; ` +
+        "Tekiya will retry.");
+    default:
+      return new TorRequestError("failed",
+        `Tor request to ${host} failed (curl ${exitCode ?? "killed"}${
+          detail ? `: ${detail}` : ""}); no direct fallback attempted`);
+  }
+}
+
+export function describeHttpError(
+  host: string,
+  status: number,
+  body: unknown,
+): TorRequestError {
+  // Dojo errors look like { status: "error", error: "…" }.
+  const text = typeof body === "object" && body !== null && "error" in body &&
+      typeof body.error === "string"
+    ? ` (${body.error.replace(/[^\x20-\x7e]/g, "").slice(0, 120)})`
+    : "";
+  if (status > 0 && status < 400) {
+    return new TorRequestError("http_error",
+      `The Dojo at ${host} reported an error${text}.`, status);
+  }
+  if (status === 401 || status === 403) {
+    return new TorRequestError("unauthorized",
+      `The Dojo at ${host} refused the request${text}. If this persists, ` +
+      "its API key changed: pair again with a current pairing.", status);
+  }
+  if (status === 404) {
+    return new TorRequestError("not_found",
+      `The Dojo at ${host} has no such endpoint${text}. Check the pairing ` +
+      "URL; testnet Dojos use /test/v2/.", status);
+  }
+  return new TorRequestError("http_error",
+    `The Dojo at ${host} answered HTTP ${status}${text}.`, status);
+}
+
 export function torJson(
   address: string,
   options: RequestOptions = {},
 ): Promise<unknown> {
   const url = onionUrl(address, false, true);
+  const proxy = proxyAddress();
   const lines = [
     `url = ${JSON.stringify(url.href)}`,
     `request = "${options.form ? "POST" : "GET"}"`,
@@ -62,19 +140,21 @@ export function torJson(
     // -q ignores curlrc; empty noproxy prevents environment bypass.
     const child = spawn("curl", [
       "-q",
-      "--proxy", proxyAddress(),
+      "--proxy", proxy,
       "--noproxy", "",
       "--proto", "=http",
-      "--connect-timeout", "30",
-      "--max-time", "90",
+      "--connect-timeout", String(options.connectTimeout ?? 30),
+      "--max-time", String(options.maxTime ?? 90),
       "--max-filesize", "2097152",
-      "--fail", "--silent", "--show-error",
+      "--silent", "--show-error",
+      "--write-out", "\n%{http_code}",
       "--config", "-",
     ], { stdio: ["pipe", "pipe", "pipe"] });
 
     const chunks: Buffer[] = [];
     let size = 0;
     let overflow = false;
+    let stderr = "";
 
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
@@ -85,19 +165,40 @@ export function torJson(
         chunks.push(chunk);
       }
     });
-    child.stderr.resume();
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length < 1000) stderr += chunk.toString("utf8");
+    });
     child.stdin.on("error", () => {});
     child.on("error", () => reject(new Error("Unable to execute curl")));
     child.on("close", code => {
-      if (code !== 0 || overflow) {
-        reject(new Error("Tor request failed; no direct fallback attempted"));
+      if (overflow) {
+        reject(new TorRequestError("invalid_response",
+          `The response from ${url.hostname} was too large`));
         return;
       }
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown);
-      } catch {
-        reject(new Error("Backend response was not valid JSON"));
+      if (code !== 0) {
+        reject(describeFailure(url.hostname, proxy, code, stderr));
+        return;
       }
+      const text = Buffer.concat(chunks).toString("utf8");
+      const separator = text.lastIndexOf("\n");
+      const status = Number(text.slice(separator + 1));
+      let body: unknown;
+      try {
+        body = JSON.parse(text.slice(0, Math.max(separator, 0))) as unknown;
+      } catch {
+        body = undefined;
+      }
+      if (!Number.isInteger(status) || status >= 400 || status === 0) {
+        reject(describeHttpError(url.hostname, status || 0, body));
+        return;
+      }
+      if (body === undefined) {
+        reject(new TorRequestError("invalid_response",
+          `${url.hostname} did not answer with JSON`));
+        return;
+      }
+      resolve(body);
     });
     child.stdin.end(lines.join("\n") + "\n");
   });
@@ -137,7 +238,7 @@ export async function connectDojo(
       typeof result === "object" && result !== null &&
       "status" in result && result.status === "error"
     ) {
-      throw new Error("Dojo reported an API error");
+      throw describeHttpError(base.hostname, 200, result);
     }
     return result;
   };

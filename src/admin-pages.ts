@@ -74,7 +74,9 @@ function checkButton(label = "Check now"): string {
 function syncLine(monitor: MonitorState): string {
   if (monitor.lastError) {
     return `<p class="hint">Last Dojo check failed: ${
-      escape(monitor.lastError)}</p>`;
+      escape(monitor.lastError)}<br>${monitor.lastSuccess
+        ? `Last successful check: ${escape(formatTime(monitor.lastSuccess))}.`
+        : "No check has succeeded since Tekiya started."}</p>`;
   }
   return monitor.lastSuccess
     ? `<p class="hint">Last checked ${escape(formatTime(monitor.lastSuccess))}.
