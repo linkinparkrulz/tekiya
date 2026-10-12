@@ -85,14 +85,23 @@ test("a store can create a request and follow it to paid", async () => {
     });
     assert.deepEqual(
       (await call(base, "/v1/status", { headers: auth })).body,
-      { network, ready: true, issuing: true, reason: null },
+      {
+        network, ready: true, issuing: true, reason: null,
+        assets: {
+          BTC: { issuing: true, reason: null },
+          XMR: { enabled: false, issuing: false, reason: "Monero is not enabled" },
+        },
+      },
     );
 
     const created = await create(base, "order_0000000000000001", 5000);
     assert.equal(created.status, 200);
     assert.equal(created.body.status, "pending");
     assert.equal(created.body.address, deriveAddress(config, 0));
-    assert.deepEqual(created.body.received, { confirmedSats: 0, unconfirmedSats: 0 });
+    assert.deepEqual(created.body.received, {
+      confirmedSats: 0, unconfirmedSats: 0, confirmedAtomic: 0, unconfirmedAtomic: 0,
+    });
+    assert.equal(created.body.asset, "BTC");
 
     const path = "/v1/payment-requests/order_0000000000000001";
     store.recordReceived(0, 0, 5000);

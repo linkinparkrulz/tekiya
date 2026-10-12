@@ -7,7 +7,13 @@ import {
 import { deriveAddress } from "./bitcoin.js";
 import { requireApproval } from "./approval.js";
 import { bitcoinUri } from "./html.js";
-import { Store, type PaymentStatus } from "./store.js";
+import {
+  XMR_CONFIRMATIONS, allocateMonero, moneroNetwork, moneroSettings,
+  moneroUri, xmrBlocker,
+} from "./monero.js";
+import {
+  Store, type PaymentStatus, type XmrPaymentStatus,
+} from "./store.js";
 
 // Integration API for shop backends; documented in docs/API.md.
 
@@ -49,19 +55,50 @@ function present(status: PaymentStatus, network: NetworkName) {
   const { allocation } = status;
   return {
     id: allocation.request_id,
+    asset: "BTC",
     address: allocation.address,
     amountSats: allocation.amount_sats,
+    amountAtomic: allocation.amount_sats,
+    uri: bitcoinUri(allocation.address, allocation.amount_sats),
     bitcoinUri: bitcoinUri(allocation.address, allocation.amount_sats),
     network,
     createdAt: allocation.created_at,
     received: {
       confirmedSats: status.confirmedSats,
       unconfirmedSats: status.unconfirmedSats,
+      confirmedAtomic: status.confirmedSats,
+      unconfirmedAtomic: status.unconfirmedSats,
     },
     status: status.state,
     firstConfirmedBlock: status.firstConfirmedBlock,
     checkedAt: status.checkedAt,
   };
+}
+
+function presentXmr(status: XmrPaymentStatus, network: NetworkName) {
+  const { allocation } = status;
+  return {
+    id: allocation.request_id,
+    asset: "XMR",
+    address: allocation.address,
+    amountAtomic: allocation.amount_atomic,
+    uri: moneroUri(allocation.address, allocation.amount_atomic),
+    network: moneroNetwork(network),
+    createdAt: allocation.created_at,
+    received: {
+      confirmedAtomic: status.confirmedAtomic,
+      unconfirmedAtomic: status.pendingAtomic,
+    },
+    status: status.state,
+    confirmationsRequired: XMR_CONFIRMATIONS,
+    checkedAt: status.checkedAt,
+  };
+}
+
+function xmrStatusOf(store: Store, id: string): XmrPaymentStatus {
+  const status = store.xmrPaymentStatus(id);
+  if (!status) throw new ApiError(404, "not_found", "Unknown payment request");
+  return status;
 }
 
 function statusOf(store: Store, id: string): PaymentStatus {
@@ -93,11 +130,20 @@ async function route(
     } catch (error) {
       reason = error instanceof Error ? error.message : "Not ready";
     }
+    const xmrReason = xmrBlocker(store);
     return {
       network,
       ready,
       issuing: reason === undefined,
       reason: reason ?? null,
+      assets: {
+        BTC: { issuing: reason === undefined, reason: reason ?? null },
+        XMR: {
+          enabled: moneroSettings(store) !== undefined,
+          issuing: xmrReason === undefined,
+          reason: xmrReason ?? null,
+        },
+      },
     };
   }
 
@@ -106,6 +152,25 @@ async function route(
       req.headers["content-type"]?.split(";")[0] === "application/json",
       "Expected application/json",
     );
+    const input = z.discriminatedUnion("asset", [
+      z.object({
+        asset: z.literal("BTC"),
+        amountSats: z.number().int().min(0).max(100000000).default(0),
+      }).strict(),
+      z.object({
+        asset: z.literal("XMR"),
+        amountAtomic: z.number().int().min(0).default(0),
+      }).strict(),
+    ]).parse({ asset: "BTC", ...z.object({}).passthrough()
+      .parse(await readJson(req)) });
+    const id = z.string({
+      required_error: "Idempotency-Key header is required",
+    }).parse(req.headers["idempotency-key"]);
+
+    if (input.asset === "XMR") {
+      const allocation = await allocateMonero(store, id, input.amountAtomic);
+      return presentXmr(xmrStatusOf(store, allocation.request_id), network);
+    }
     try {
       requireApproval(store, config);
     } catch (error) {
@@ -113,18 +178,17 @@ async function route(
         error instanceof Error ? error.message : "Not approved",
       );
     }
-    const input = z.object({
-      amountSats: z.number().int().min(0).max(100000000).default(0),
-    }).strict().parse(await readJson(req));
-    const id = z.string({
-      required_error: "Idempotency-Key header is required",
-    }).parse(req.headers["idempotency-key"]);
     const allocation = store.allocate(id, input.amountSats, derive);
     return present(statusOf(store, allocation.request_id), network);
   }
 
   const match = /^\/v1\/payment-requests\/([A-Za-z0-9_-]{1,128})$/.exec(path);
   if (req.method === "GET" && match?.[1]) {
+    // A web request may have both; ?asset=XMR selects Monero.
+    const asset = new URL(req.url ?? "", "http://x").searchParams.get("asset");
+    if (asset === "XMR" || (asset !== "BTC" && !store.paymentStatus(match[1]))) {
+      return presentXmr(xmrStatusOf(store, match[1]), network);
+    }
     return present(statusOf(store, match[1]), network);
   }
 

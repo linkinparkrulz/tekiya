@@ -51,6 +51,33 @@ Following publishes the dispenser–merchant relationship in a public
 directory. It does not affect payment discovery, which relies on the
 notification transaction.
 
+## Monero (optional)
+
+Start the view-only wallet service with
+`docker compose --profile monero up -d --build`, then open **Monero** in
+the dashboard and enter the wallet's primary address, private view key and
+a node (a `.onion` node, reached through Tor, or one on your own machine or
+network). On testnet4 installations Monero uses stagenet.
+
+Tekiya creates a view-only `monero-wallet-rpc` wallet from those keys; the
+view key is passed to the wallet once and never stored by Tekiya. The
+wallet cannot spend. Each payment gets a fresh subaddress in a dedicated
+account (default 1), so Tekiya never hands out an address the merchant's
+wallet shows elsewhere; Monero wallets find payments to it on their own.
+Payments count as paid after 10 confirmations, and issuing pauses after 150
+unused subaddresses in a row.
+
+A view key reveals every payment the wallet receives to this server: use a
+dedicated wallet, or at least a dedicated account.
+
+On the payment page, payers choose Bitcoin or Monero; only the chosen
+coin's address is created. One QR cannot serve both, since each wallet
+only understands its own `bitcoin:` or `monero:` link.
+
+The wallet image verifies the release: `hashes.txt` must carry a valid
+signature from binaryFate's release key (fingerprint pinned in
+`deploy/Monero.Dockerfile`), and the archive must match its SHA-256.
+
 ## Integration API
 
 Shops and other backends request a fresh address per order and follow its

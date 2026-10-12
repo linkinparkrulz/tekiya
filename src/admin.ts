@@ -15,6 +15,7 @@ import {
   prepareNotification,
 } from "./setup.js";
 import { syncDojo } from "./registrar.js";
+import { disableMonero, enableMonero } from "./monero.js";
 import { Store } from "./store.js";
 
 /**
@@ -206,6 +207,20 @@ export function serveAdmin(
       store.clearHalt();
     },
     "/check": () => monitor.run(),
+    "/monero/enable": async form => {
+      const height = form.get("restoreHeight") ?? "";
+      await enableMonero(store, network, {
+        address: form.get("address") ?? "",
+        viewKey: form.get("viewKey") ?? "",
+        node: form.get("node") ?? "",
+        ...(height ? { restoreHeight: Number(height) } : {}),
+        account: Number(form.get("account") ?? "1"),
+      });
+      await monitor.syncMonero();
+    },
+    "/monero/disable": async () => {
+      disableMonero(store);
+    },
     "/paynym": () => monitor.registerPaynym(),
   };
 

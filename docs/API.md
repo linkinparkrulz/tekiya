@@ -35,6 +35,12 @@ Content-Type: application/json
 - `amountSats`: 0–100,000,000. `0` means any amount; it is still put in
   the `bitcoin:` URI only when non-zero.
 
+For Monero (when enabled in the dashboard), send
+`{ "asset": "XMR", "amountAtomic": 50000000000 }` (piconero; 1 XMR =
+10¹² piconero). The response has the same shape with `asset: "XMR"`, a
+`monero:` URI, `network` `mainnet` or `stagenet`, and
+`confirmationsRequired: 10`. `asset` defaults to `BTC`.
+
 Returns `200` with a [payment request](#payment-request).
 
 ## Read a payment request
@@ -45,7 +51,8 @@ Authorization: Bearer <token>
 ```
 
 Returns `200` with a [payment request](#payment-request), or
-`404 not_found`.
+`404 not_found`. A payment-page request can have both a Bitcoin and a
+Monero address; add `?asset=XMR` or `?asset=BTC` to choose.
 
 ## Check whether new requests can be created
 
@@ -59,7 +66,8 @@ Authorization: Bearer <token>
   "reason": "Issuance paused: the next address would be beyond the receiving wallet's lookahead until a payment confirms" }
 ```
 
-Call it before showing a checkout, so buyers see "temporarily unavailable"
+It also has `assets.BTC` and `assets.XMR` (`enabled`, `issuing`,
+`reason`) for each coin. Call it before showing a checkout, so buyers see "temporarily unavailable"
 instead of an error at the last step. `ready` means setup and the
 merchant's approval are complete; `issuing` means the next POST should
 succeed.
@@ -74,7 +82,11 @@ succeed.
   "bitcoinUri": "bitcoin:tb1q…?amount=0.00005000",
   "network": "testnet4",
   "createdAt": "2026-10-11T12:00:00.000Z",
-  "received": { "confirmedSats": 5000, "unconfirmedSats": 0 },
+  "asset": "BTC",
+  "amountAtomic": 5000,
+  "uri": "bitcoin:tb1q…?amount=0.00005000",
+  "received": { "confirmedSats": 5000, "unconfirmedSats": 0,
+                "confirmedAtomic": 5000, "unconfirmedAtomic": 0 },
   "status": "paid",
   "firstConfirmedBlock": 154100,
   "checkedAt": "2026-10-11T12:21:04.000Z"
@@ -120,5 +132,8 @@ Errors return `{ "error": "<message>", "code": "<code>" }`.
   orders in a row pause new requests (`503 unavailable`).
 - **Staging cap.** This development build issues at most 5 addresses per
   installation.
-- **Amounts in sats only.** Convert fiat prices in your application and
-  lock the quote for as long as you keep the order open.
+- **Amounts in atomic units.** Sats for Bitcoin, piconero for Monero.
+  Convert fiat prices in your application and lock the quote for as long
+  as you keep the order open.
+- **Monero** confirms after 10 blocks (about 20 minutes) and pauses after
+  150 unused subaddresses in a row.

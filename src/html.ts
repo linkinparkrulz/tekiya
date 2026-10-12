@@ -94,6 +94,17 @@ th, td { text-align: left; padding: 0.45rem 0.6rem;
 th { color: var(--muted); font-weight: 600; }
 .nowrap { white-space: nowrap; }
 .copyable { user-select: all; }
+.amount-row { display: flex; gap: 0.5rem; }
+.amount-row select { font: inherit; padding: 0.6rem; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+.tabs { display: flex; gap: 0.25rem; padding: 0.25rem; border-radius: 10px;
+  background: var(--code); }
+.tabs .tab { flex: 1; text-align: center; padding: 0.55rem 0.8rem;
+  border-radius: 8px; font: inherit; font-weight: 600; border: 0;
+  background: transparent; color: var(--muted); text-decoration: none;
+  cursor: pointer; }
+.tabs .tab.active { background: var(--surface); color: var(--text);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.15); }
 fieldset.dial { border: 0; padding: 0; margin: 0; display: grid; gap: 0.5rem; }
 fieldset.dial legend { font-weight: 600; margin-bottom: 0.5rem; padding: 0; }
 label.preset { display: flex; gap: 0.6rem; align-items: center;

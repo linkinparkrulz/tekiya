@@ -5,6 +5,7 @@ import {
   type FundingObservation,
 } from "./setup.js";
 import { paynymComplete, registerPaynym } from "./paynym.js";
+import { moneroSettings, syncMonero } from "./monero.js";
 import { Store } from "./store.js";
 
 const PAYNYM_RETRY_MS = 10 * 60 * 1000;
@@ -19,6 +20,9 @@ export interface MonitorState {
   notificationConfirmations?: number;
   paynymError?: string;
   paynymAttempt?: string;
+  moneroHeight?: number;
+  moneroChecked?: string;
+  moneroError?: string;
 }
 
 /**
@@ -31,6 +35,7 @@ export class Monitor {
   readonly state: MonitorState = {};
   #running: Promise<void> | undefined;
   #paynym: Promise<void> | undefined;
+  #monero: Promise<void> | undefined;
   #timer: NodeJS.Timeout | undefined;
 
   constructor(
@@ -78,9 +83,33 @@ export class Monitor {
     }
   }
 
+  // Refreshes Monero payments; joins a refresh already in progress.
+  syncMonero(): Promise<void> {
+    this.#monero ??= this.#syncMonero().finally(() => {
+      this.#monero = undefined;
+    });
+    return this.#monero;
+  }
+
+  async #syncMonero(): Promise<void> {
+    if (!moneroSettings(this.store)) return;
+    try {
+      const result = await syncMonero(this.store);
+      if (result) this.state.moneroHeight = result.height;
+      this.state.moneroChecked = new Date().toISOString();
+      delete this.state.moneroError;
+    } catch (error) {
+      this.state.moneroError =
+        error instanceof Error ? error.message : "unknown error";
+      console.error(`Monero check failed: ${this.state.moneroError}`);
+    }
+  }
+
   async #check(): Promise<void> {
     const config = this.store.get("config", Config);
     if (!config || config.network !== this.network) return;
+    // Independent of the Dojo; a slow Monero node never delays it.
+    void this.syncMonero();
 
     const last = this.state.paynymAttempt;
     if (
