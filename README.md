@@ -57,7 +57,15 @@ Start the view-only wallet service with
 `docker compose --profile monero up -d --build`, then open **Monero** in
 the dashboard and enter the wallet's primary address, private view key and
 a node (a `.onion` node, reached through Tor, or one on your own machine or
-network). On testnet4 installations Monero uses stagenet.
+network). On testnet4 installations Monero uses stagenet, where clearnet
+nodes are also accepted, always reached through Tor, because public
+stagenet nodes are mostly clearnet (for example
+`stagenet.community.rino.io:38081`). Mainnet never accepts clearnet nodes.
+
+To test, run Feather with `feather --stagenet`, create a wallet, copy its
+primary address (starts with `5`) and private view key (Wallet → Keys),
+and get stagenet coins from a faucet such as `stagenet-faucet.xmr-tw.org`
+(third-party).
 
 Tekiya creates a view-only `monero-wallet-rpc` wallet from those keys; the
 view key is passed to the wallet once and never stored by Tekiya. The

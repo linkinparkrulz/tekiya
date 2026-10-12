@@ -88,13 +88,23 @@ after(() => server.close());
 
 const node = `${"n".repeat(56)}.onion:18081`;
 
-test("nodes must be onion or local", () => {
-  assert.deepEqual(validateNode(node), { address: node, onion: true });
-  assert.equal(validateNode("192.168.1.20").address, "192.168.1.20:18081");
-  assert.equal(validateNode("monerod:18089").onion, false);
-  assert.throws(() => validateNode("node.example.com:18089"), /onion/);
-  assert.throws(() => validateNode("8.8.8.8:18081"), /onion/);
-  assert.throws(() => validateNode(`http://${node}/json_rpc`));
+test("mainnet nodes must be onion or local", () => {
+  assert.deepEqual(validateNode(node, "mainnet"), { address: node, viaTor: true });
+  assert.deepEqual(validateNode("192.168.1.20", "mainnet"),
+    { address: "192.168.1.20:18081", viaTor: false });
+  assert.equal(validateNode("monerod:18089", "mainnet").viaTor, false);
+  assert.throws(() => validateNode("node.example.com:18089", "mainnet"), /onion/);
+  assert.throws(() => validateNode("8.8.8.8:18081", "mainnet"), /onion/);
+  assert.throws(() => validateNode(`http://${node}/json_rpc`, "mainnet"));
+});
+
+test("stagenet also accepts clearnet nodes, always through Tor", () => {
+  assert.deepEqual(validateNode("stagenet.community.rino.io", "stagenet"),
+    { address: "stagenet.community.rino.io:38081", viaTor: true });
+  assert.equal(validateNode("8.8.8.8:38081", "stagenet").viaTor, true);
+  assert.equal(validateNode("192.168.1.20", "stagenet").viaTor, false);
+  assert.equal(validateNode("192.168.1.20", "stagenet").address,
+    "192.168.1.20:38081");
 });
 
 test("XMR amounts and URIs use exact piconero", () => {
@@ -133,7 +143,21 @@ test("enabling creates a view-only wallet and a dedicated account", async () => 
     await assert.rejects(enableMonero(store, "testnet4", {
       address: `5${"B".repeat(94)}`, viewKey: VIEW_KEY, node,
     }), /another address/);
-    assert.throws(() => validateNode("example.org"));
+    assert.throws(() => validateNode("example.org", "mainnet"));
+
+    // A clearnet stagenet node is set up with the Tor proxy.
+    const other = new Store(":memory:");
+    try {
+      await enableMonero(other, "testnet4", {
+        address: PRIMARY, viewKey: VIEW_KEY, node: "stagenet.community.rino.io:38081",
+      });
+      assert.deepEqual(wallet.daemon, {
+        address: "stagenet.community.rino.io:38081", trusted: false,
+        ssl_support: "disabled", proxy: "tor:9050",
+      });
+    } finally {
+      other.close();
+    }
   } finally {
     store.close();
   }

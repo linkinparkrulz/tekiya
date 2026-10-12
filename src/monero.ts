@@ -74,23 +74,30 @@ function isPrivateHost(host: string): boolean {
 
 /**
  * A node on a .onion address (reached through Tor) or on this machine or
- * private network. Clearnet nodes are refused.
+ * private network. Stagenet also accepts clearnet nodes, as public test
+ * nodes are mostly clearnet; they too are reached only through Tor.
  */
-export function validateNode(value: string): { address: string; onion: boolean } {
+export function validateNode(
+  value: string,
+  network: MoneroNetwork,
+): { address: string; viaTor: boolean } {
   const text = value.trim().replace(/\/+$/, "");
   const url = new URL(/^[a-z]+:\/\//.test(text) ? text : `http://${text}`);
+  const example = network === "mainnet"
+    ? "abc…xyz.onion:18081" : "stagenet.community.rino.io:38081";
   requireCondition(
     url.protocol === "http:" && !url.username && !url.password &&
       url.pathname === "/" && !url.search && !url.hash,
-    "Enter the node as host:port, for example abc…xyz.onion:18081",
+    `Enter the node as host:port, for example ${example}`,
   );
   const onion = /^[a-z2-7]{56}\.onion$/.test(url.hostname);
+  const local = !onion && isPrivateHost(url.hostname);
   requireCondition(
-    onion || isPrivateHost(url.hostname),
+    onion || local || network === "stagenet",
     "Use a .onion node or one on your own machine or network",
   );
-  const port = url.port || "18081";
-  return { address: `${url.hostname}:${port}`, onion };
+  const port = url.port || (network === "mainnet" ? "18081" : "38081");
+  return { address: `${url.hostname}:${port}`, viaTor: !local };
 }
 
 export function parseXmrAmount(value: string): number {
@@ -192,14 +199,18 @@ export const callWallet: MoneroRpc = (method, params = {}) => {
 
 // --- Wallet operations ----------------------------------------------------
 
-async function setDaemon(rpc: MoneroRpc, node: string): Promise<void> {
-  const { address, onion } = validateNode(node);
+async function setDaemon(
+  rpc: MoneroRpc,
+  node: string,
+  network: MoneroNetwork,
+): Promise<void> {
+  const { address, viaTor } = validateNode(node, network);
   await rpc("set_daemon", {
     address,
     trusted: false,
     ssl_support: "disabled",
-    // Onion nodes through the Tor container; local nodes directly.
-    ...(onion ? { proxy: process.env.NYM_MONERO_PROXY ?? "tor:9050" } : {}),
+    // Remote nodes through the Tor container; local nodes directly.
+    ...(viaTor ? { proxy: process.env.NYM_MONERO_PROXY ?? "tor:9050" } : {}),
   });
 }
 
@@ -233,7 +244,7 @@ export async function enableMonero(
   const xmrNetwork = moneroNetwork(network);
   const address = validatePrimaryAddress(input.address, xmrNetwork);
   const viewKey = validateViewKey(input.viewKey);
-  validateNode(input.node);
+  validateNode(input.node, xmrNetwork);
   const account = input.account ?? 1;
   requireCondition(
     Number.isInteger(account) && account >= 1 && account <= 49,
@@ -259,7 +270,7 @@ export async function enableMonero(
     enabledAt: previous?.enabledAt ?? new Date().toISOString(),
   };
 
-  await setDaemon(rpc, settings.node);
+  await setDaemon(rpc, settings.node, settings.network);
   try {
     await rpc("generate_from_keys", {
       filename: settings.walletFile,
@@ -308,7 +319,7 @@ async function ensureOpen(rpc: MoneroRpc, settings: MoneroSettings) {
     await rpc("get_height");
   } catch (error) {
     if (!(error instanceof MoneroRpcError)) throw error;
-    await setDaemon(rpc, settings.node);
+    await setDaemon(rpc, settings.node, settings.network);
     await rpc("open_wallet", {
       filename: settings.walletFile, password: settings.walletPassword,
     });

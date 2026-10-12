@@ -497,9 +497,12 @@ again reuses that wallet.</p>` : ""}
 spend key or seed.</p></div>
 <div><label for="node">Monero node</label>
 <input type="text" id="node" name="node" autocomplete="off" required
-  value="${escape(settings?.node ?? "")}" placeholder="abc…xyz.onion:18081">
-<p class="hint">A .onion node (reached through Tor) or one on your own
-machine or network.</p></div>
+  value="${escape(settings?.node ?? "")}" placeholder="${network === "mainnet"
+    ? "abc…xyz.onion:18081" : "stagenet.community.rino.io:38081"}">
+<p class="hint">${network === "mainnet"
+    ? "A .onion node (reached through Tor) or one on your own machine or network."
+    : "A .onion or clearnet stagenet node (always reached through Tor), or " +
+      "one on your own network."}</p></div>
 <div><label for="restoreHeight">Restore height
 <span class="muted">(optional)</span></label>
 <input type="number" id="restoreHeight" name="restoreHeight" min="0"

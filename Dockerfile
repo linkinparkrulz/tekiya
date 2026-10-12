@@ -1,4 +1,8 @@
 FROM node:24-bookworm-slim AS build
+# Tests exercise the same curl transport the app uses at runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
