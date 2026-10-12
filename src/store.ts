@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   ISSUANCE_LIMIT, RECEIVER_LOOKAHEAD, Unavailable, requireCondition,
@@ -172,6 +173,7 @@ export class Store {
       this.db.prepare(
         "INSERT OR REPLACE INTO settings(key, value) VALUES ('pairing', ?)",
       ).run(JSON.stringify(value));
+      this.replace("pairing-generation", randomUUID());
       this.db.exec("DELETE FROM registrations");
       this.db.exec("COMMIT");
     } catch (error) {
@@ -305,9 +307,21 @@ export class Store {
 
   // First submission wins; a resubmitted form keeps the original request.
   createWebRequest(id: string, currency: "BTC" | "XMR", amount: number): void {
-    this.db.prepare(
-      "INSERT OR IGNORE INTO web_requests VALUES (?, ?, ?, ?)",
-    ).run(id, currency, amount, new Date().toISOString());
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.findWebRequest(id)) {
+        const row = this.db.prepare("SELECT COUNT(*) AS count FROM web_requests").get();
+        if (Number(row?.count) >= 1000) {
+          throw new Unavailable("Payment-page request limit reached");
+        }
+        this.db.prepare("INSERT INTO web_requests VALUES (?, ?, ?, ?)")
+          .run(id, currency, amount, new Date().toISOString());
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   findWebRequest(id: string): WebRequest | undefined {

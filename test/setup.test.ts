@@ -11,7 +11,8 @@ import { sameOrigin } from "../src/admin.js";
 import {
   FeeChoice, approve, chosenRate, feeForRate, feePresets, fundingRequired,
   initialize, normalizeOnion, notificationConfirmed, parsePairing,
-  recordNotificationConfirmed, usableFunding,
+   recordNotificationConfirmed, usableFunding, confirmedNotification,
+   prepareNotification,
 } from "../src/setup.js";
 import { Store } from "../src/store.js";
 
@@ -21,6 +22,45 @@ const dojo = `http://${"d".repeat(56)}.onion`;
 test("onion addresses are accepted with or without a scheme", () => {
   assert.equal(normalizeOnion(` ${onion}/ `), `http://${onion}`);
   assert.equal(normalizeOnion(`http://${onion}`), `http://${onion}`);
+});
+
+test("historical confirmation preserves progress but cannot bypass a fresh check", async () => {
+  const store = new Store(":memory:");
+  try {
+    const code = createWallet("22".repeat(64), "testnet4").sender.toBase58();
+    const config = initialize(store, "testnet4", code, onion);
+    const funding = new Transaction();
+    funding.addInput(Buffer.alloc(32, 7), 0);
+    funding.addOutput(createWallet(config.seedHex, "testnet4").fundingScript, 50000n);
+    const pending = buildNotification(config, funding.toHex(), 0, 1000);
+    store.insert("notification", pending);
+    recordNotificationConfirmed(store);
+    await assert.rejects(confirmedNotification(store, config, async () => ({
+      hex: pending.hex, confirmations: 0,
+    })), /not confirmed yet/);
+    await assert.rejects(confirmedNotification(store, config, async () => {
+      throw new Error("offline");
+    }), /offline/);
+    assert.ok(notificationConfirmed(store));
+    assert.equal((await confirmedNotification(store, config, async () => ({
+      hex: pending.hex, confirmations: 1,
+    }))).txid, pending.txid);
+  } finally { store.close(); }
+});
+
+test("new preparation enforces the fee floor without persisting a rejected transaction", async () => {
+  const store = new Store(":memory:");
+  try {
+    const code = createWallet("22".repeat(64), "testnet4").sender.toBase58();
+    const config = initialize(store, "testnet4", code, onion);
+    const funding = new Transaction();
+    funding.addInput(Buffer.alloc(32, 7), 0);
+    funding.addOutput(createWallet(config.seedHex, "testnet4").fundingScript, 50000n);
+    const api = async () => ({ hex: funding.toHex(), confirmations: 1 });
+    await assert.rejects(prepareNotification(store, config, api, funding.getId(), 0, 1000), /below 25/);
+    const pending = await prepareNotification(store, config, api, funding.getId(), 0, 10000);
+    assert.ok(pending.feeRate >= 25);
+  } finally { store.close(); }
 });
 
 test("pairings are read in Dojo's export format and Tekiya's", () => {

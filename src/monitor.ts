@@ -1,12 +1,12 @@
 import { Config, Pairing, Pending, type NetworkName } from "./config.js";
 import { syncDojo, type SyncResult } from "./registrar.js";
 import {
-  connectPaired, notificationConfirmed, notificationStatus, observeFunding,
+  connectPaired, notificationStatus, observeFunding,
   recordNotificationConfirmed,
   type FundingObservation,
 } from "./setup.js";
 import { paynymComplete, registerPaynym } from "./paynym.js";
-import { moneroSettings, syncMonero } from "./monero.js";
+import { configuredMoneroSettings, syncMonero } from "./monero.js";
 import { Store } from "./store.js";
 
 const PAYNYM_RETRY_MS = 10 * 60 * 1000;
@@ -93,7 +93,7 @@ export class Monitor {
   }
 
   async #syncMonero(): Promise<void> {
-    if (!moneroSettings(this.store)) return;
+    if (!configuredMoneroSettings(this.store)) return;
     try {
       const result = await syncMonero(this.store);
       if (result) this.state.moneroHeight = result.height;
@@ -130,7 +130,7 @@ export class Monitor {
       const pending = this.store.get("notification", Pending);
       if (!pending) {
         this.state.funding = await observeFunding(config, api);
-      } else if (!notificationConfirmed(this.store)) {
+      } else {
         try {
           this.state.notificationConfirmations =
             (await notificationStatus(api, pending)).confirmations;

@@ -303,6 +303,8 @@ export async function prepareNotification(
     "The funding transaction is not confirmed yet",
   );
   const pending = buildNotification(config, previous.hex, vout, feeSats);
+  requireCondition(pending.feeRate >= MIN_FEE_RATE,
+    `The fee is below ${MIN_FEE_RATE} sat/vB`);
   store.insert("notification", pending);
   return pending;
 }
@@ -386,7 +388,6 @@ export async function confirmedNotification(
   const pending = store.get("notification", Pending);
   requireCondition(pending, "Prepare a notification first");
   reconstruct(config, pending);
-  if (notificationConfirmed(store)) return pending;
   const { confirmations } = await notificationStatus(api, pending);
   requireCondition(
     confirmations > 0,

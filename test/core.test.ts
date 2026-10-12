@@ -7,7 +7,7 @@ import {
 } from "../src/config.js";
 import {
   createWallet, deriveAddress, buildNotification,
-  identityStatement, verifyIdentity, messages,
+  identityStatement, verifyIdentity, messages, reconstruct,
 } from "../src/bitcoin.js";
 import { Store } from "../src/store.js";
 
@@ -115,4 +115,14 @@ test("allocation is idempotent, bounded, and does not reuse indices", () => {
   } finally {
     store.close();
   }
+});
+
+test("historical low-fee notifications still reconstruct exactly", () => {
+  const config = fixture("testnet4");
+  const funding = new Transaction();
+  funding.addInput(Buffer.alloc(32, 7), 0);
+  funding.addOutput(createWallet(config.seedHex, config.network).fundingScript, 50000n);
+  const pending = buildNotification(config, funding.toHex(), 0, 1000);
+  assert.ok(pending.feeRate < 25);
+  assert.deepEqual(reconstruct(config, pending), pending);
 });

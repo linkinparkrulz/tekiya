@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
-  Config, Profile, Unavailable, requireCondition, type NetworkName,
+  Config, Profile, Unavailable, publicPaymentsEnabled, requireCondition, type NetworkName,
 } from "./config.js";
 import { createWallet, deriveAddress } from "./bitcoin.js";
 import {
@@ -235,6 +235,11 @@ export async function handlePublic(
   };
 
   if (req.method === "GET" && path === "/") {
+    if (!publicPaymentsEnabled()) {
+      sendHtml(res, 503, message(site, "Public payments disabled",
+        "This service is not accepting anonymous payment requests."));
+      return true;
+    }
     try {
       requireCondition(config, "Not set up");
       requireApproval(store, config);
@@ -258,6 +263,7 @@ export async function handlePublic(
 
   if (req.method === "POST" && path === "/pay") {
     try {
+      if (!publicPaymentsEnabled()) throw new Unavailable("Public payments disabled");
       if (!config) throw new Unavailable("Not set up");
       requireApproval(store, config);
       const body = await readForm(req);
@@ -301,6 +307,10 @@ export async function handlePublic(
       const request = store.findWebRequest(id);
       if (!config || !request) throw new Error("This payment link is not valid");
       const coin = (await readForm(req)).get("coin") === "xmr" ? "xmr" : "btc";
+      const exists = coin === "xmr" ? store.findXmr(id) : store.findAllocation(id);
+      if (!exists && !publicPaymentsEnabled()) {
+        throw new Unavailable("Public payments disabled");
+      }
       // An amount entered in the other coin is dropped.
       if (coin === "xmr") {
         await allocateMonero(store, id,

@@ -97,19 +97,27 @@ succeed.
 | --- | --- |
 | `pending` | Nothing received yet. |
 | `seen` | Confirmed plus unconfirmed reaches the amount; not final. |
-| `paid` | Confirmed amount reaches the amount (any confirmed payment when the amount is 0). |
+| `paid` | Confirmed amount reaches the amount (any confirmed payment when the amount is 0). For BTC this can mean only one confirmation, not final settlement. |
 | `underpaid` | Something confirmed, but less than the amount. |
 
 `received` totals everything sent to the address, including payments after
 the first. `checkedAt` is when Tekiya last read the address from its Dojo
 (`null` before the first check). Amounts and confirmations come from the
 paired Dojo; treat them as that backend's view, not an SPV proof.
+`checkedAt` is a freshness timestamp, not the time of payment or a guarantee
+that the backend is current. Backend failures can leave it stale indefinitely.
+Do not fulfil an order based on stale or missing checks.
 
 ## Polling
 
-Tekiya checks its Dojo once a minute, so status is at most about a minute
-behind. Poll each open request every 30–60 seconds and stop once it is
-`paid` or you have closed the order. There are no webhooks.
+Tekiya attempts Dojo checks once a minute; successful checks usually lag by
+about a minute, but outages can make status arbitrarily stale. Poll requests
+every 30–60 seconds and check `checkedAt`. Continue monitoring after `paid`:
+a reorganisation can reduce confirmed totals and move status back to
+`seen`, `underpaid`, or `pending`. One BTC confirmation is not final.
+Choose a risk-appropriate settlement and reorganisation policy in your
+application; `paid` alone does not enforce a higher BTC confirmation target.
+There are no webhooks.
 
 ## Errors
 

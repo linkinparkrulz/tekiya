@@ -26,6 +26,11 @@ export const profiles: Record<NetworkName, NetworkProfile> = {
 
 export const ISSUANCE_LIMIT = 5;
 
+// Only an explicit opt-in enables anonymous, irreversible allocation.
+export function publicPaymentsEnabled(): boolean {
+  return process.env.NYM_PUBLIC_PAYMENTS === "true";
+}
+
 // Indices registered with the Dojo ahead of the next allocation.
 export const REGISTRATION_POOL = 3;
 

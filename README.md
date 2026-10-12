@@ -8,11 +8,15 @@ Not audited. Not wallet-interoperability tested. Start with testnet4.
 
 With Docker:
 
+Set `NYM_ADMIN_PASSWORD` in your shell or a local `.env` file to a unique,
+random password of at least 12 characters (for example, generate one with
+`openssl rand -hex 24`). Do not commit `.env` or share the password.
+
     docker compose up -d --build
 
 Open http://127.0.0.1:8089 on the same machine (from elsewhere, tunnel it:
 `ssh -L 8089:127.0.0.1:8089 your-server`) and follow the setup. The
-dashboard walks through every step:
+dashboard asks for that password (any username) and walks through every step:
 
 1. Paste your merchant wallet's payment code (either form; it is stored
    in SegWit form). The onion address is detected automatically. Tekiya
@@ -31,8 +35,10 @@ Without Docker: `npm ci && npm run build`, merge
 for the onion address, which Tor writes to
 `/var/lib/tor/nymdispenser/hostname`.
 
-Your payment page is then live on the onion address. Name it in the
-dashboard. Set `NYM_NETWORK=mainnet` only after testing on testnet4.
+The authenticated integration API is then available on the onion address.
+Anonymous payment creation stays disabled unless you explicitly set
+`NYM_PUBLIC_PAYMENTS=true` and recreate the app container. Name the payment
+page in the dashboard. Set `NYM_NETWORK=mainnet` only after testing on testnet4.
 
 ## PayNym directory
 
@@ -107,7 +113,15 @@ who may reach it:
 - `proxy`: behind an authenticating reverse proxy, such as Umbrel's app
   proxy. Set `NYM_ADMIN_HOST=0.0.0.0`.
 - `none`: no auth beyond the network; only behind a loopback-only
-  forwarder, as in the bundled Compose file.
+  forwarder with no untrusted peers able to reach the listener. Not used by
+  the bundled Compose file.
+
+Compose uses `password` mode and a host-loopback-only forwarder on a
+dedicated internal dashboard network. Tor and Monero do not join that
+network, but can still reach the app's admin listener on its shared private
+network; password authentication protects that path. Basic auth is not
+encrypted: keep the forwarder on localhost and use SSH tunnelling for
+remote access, not a public port or unencrypted LAN connection.
 
 In `loopback` and `none` modes the Host header must be
 `127.0.0.1:PORT` or `localhost:PORT`; add others with `NYM_ADMIN_HOSTS`.
@@ -140,12 +154,26 @@ Dojo pairing network labels are operator assertions, not chain proofs.
 
 The paired Dojo is assumed to be the one the merchant wallet uses.
 
-Before an address can be issued, it is registered with that Dojo through
+Before an address can be issued, registration is requested from that Dojo through
 a first `active=` lookup of its P2WPKH address. Dojo then tracks it,
 and a later `new=` declaration by the receiving wallet (as Ashigaru's
 Resync Paynym sends) cannot suppress its history. Pairing registers the
 first addresses immediately. `serve` keeps three addresses registered
 ahead of the next allocation and rechecks every minute.
+
+The normal pairing API does not report import success: an echoed address
+is not proof of tracking. Verify tracking in Dojo's administrative tools
+and test merchant-wallet receipt before using real funds. Incomplete
+transaction-history responses are rejected instead of replacing totals.
+
+Payment-page requests are capped at 1,000 persisted records per installation.
+Existing requests remain readable at the cap; records are not silently recycled.
+
+Monero wallet mutations are saved before allocations are exposed. An ambiguous
+RPC failure or crash leaves a durable `monero-reservation` and blocks further
+issuance. To recover, stop every issuer, reconcile the wallet's account and
+subaddresses against SQLite allocations, save the wallet, and only then remove
+that settings record using SQLite tooling. Do not clear it merely to retry.
 
 The same lookups record confirmed payments. An address is issued only
 while it is within three indices of the last confirmed payment, matching
@@ -187,7 +215,8 @@ npm run cli -- COMMAND.
 
 ## Web pages
 
-`serve` publishes a payment page at `/` on the onion service. Visitors
+With `NYM_PUBLIC_PAYMENTS=true`, `serve` publishes a payment form at `/` on
+the onion service. Visitors
 request a fresh address, optionally with an amount, and get the address,
 a QR code and a `bitcoin:` link at a private `/pay/...` URL. Pages use no
 JavaScript or external resources and work in Tor Browser's Safest mode.
@@ -198,8 +227,17 @@ Set the page's name and optional description in the dashboard or with
 characters, description up to 280, plain text). Changes apply on the next
 page load; `profile --clear` restores the default "Pay with Bitcoin".
 
-The page is unauthenticated: anyone can use up the staging addresses or
-trigger the lookahead pause. No abuse protection is included yet.
+`NYM_PUBLIC_PAYMENTS` defaults to `false`; only the exact value `true`
+enables anonymous requests and new coin allocations. Disabling it later
+leaves existing private `/pay/...` pages readable but prevents creation of
+new addresses there. The token-protected integration API is unaffected.
+
+Opting in accepts anonymous exhaustion risk: anyone can use up staging
+addresses, trigger the receiving-wallet lookahead pause, exhaust Monero's
+unused-subaddress allowance, or fill the durable 1,000 web-request quota.
+Abandoned requests and addresses are not recycled. Rate limiting alone
+cannot make irreversible anonymous allocation safe, including over Tor.
+Use the authenticated API unless you deliberately accept this risk.
 
 The operator dashboard listens on port 8089 (`NYM_ADMIN_PORT`; `0`
 disables it). After setup it shows issuance status, Dojo checks, issued

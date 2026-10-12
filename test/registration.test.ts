@@ -37,7 +37,7 @@ function fakeDojo(
         n_tx: txs.filter(tx => tx.index === index).length,
       })),
       txs: txs.map(tx => ({
-        hash: String(tx.index).repeat(64),
+        hash: String(history.indexOf(tx)).padStart(64, "0"),
         ...(tx.height === undefined ? {} : { block_height: tx.height }),
         out: [{ addr: derive(tx.index), value: tx.value ?? 1000 }],
       })),
@@ -204,4 +204,71 @@ test("re-pairing clears registrations and re-registers paid indices", async () =
   } finally {
     store.close();
   }
+});
+
+test("sync rejects changed pairing snapshots and identical re-pair generations", async () => {
+  for (const change of ["pairing", "pairing-generation"]) {
+    const store = new Store(":memory:");
+    try {
+      store.replace("pairing", { key: "original" });
+      store.replace("pairing-generation", 1);
+      const { api } = fakeDojo([{ index: 1, height: 10 }]);
+      await assert.rejects(syncDojo(store, config, async (path, form) => {
+        store.replace(change, change === "pairing" ? { key: "replacement" } : 2);
+        return api(path, form);
+      }), /stale results rejected/);
+      assert.equal(store.registeredAddress(0), undefined);
+      assert.equal(store.halted(), undefined);
+      assert.equal(store.lastConfirmedPayment(), -1);
+    } finally { store.close(); }
+  }
+});
+
+test("sync reconciles disappeared, unconfirmed and reconfirmed payments", async () => {
+  const store = new Store(":memory:");
+  try {
+    await syncDojo(store, config, fakeDojo().api);
+    store.allocate(id(0), 0, derive);
+    await syncDojo(store, config, fakeDojo([{ index: 0, height: 10 }]).api);
+    assert.equal(store.paymentStatus(id(0))?.firstConfirmedBlock, 10);
+    await syncDojo(store, config, fakeDojo([{ index: 0 }]).api);
+    assert.equal(store.lastConfirmedPayment(), -1);
+    assert.equal(store.paymentStatus(id(0))?.state, "seen");
+    await syncDojo(store, config, fakeDojo([{ index: 0, height: 20 }]).api);
+    assert.equal(store.paymentStatus(id(0))?.firstConfirmedBlock, 20);
+    await syncDojo(store, config, fakeDojo().api);
+    assert.equal(store.paymentStatus(id(0))?.state, "pending");
+    assert.equal(store.paymentStatus(id(0))?.firstConfirmedBlock, null);
+  } finally { store.close(); }
+});
+
+test("incomplete transaction history and malformed later entries write nothing", async () => {
+  const store = new Store(":memory:");
+  try {
+    const { api } = fakeDojo([{ index: 0, height: 10 }]);
+    await assert.rejects(syncDojo(store, config, async (path, form) => {
+      const response = await api(path, form) as { txs: unknown[] };
+      return { ...response, txs: [] };
+    }), /history is incomplete/);
+    assert.equal(store.registeredAddress(0), undefined);
+    await assert.rejects(syncDojo(store, config, fakeDojo([], [2]).api), /index-2/);
+    assert.equal(store.registeredAddress(0), undefined);
+  } finally { store.close(); }
+});
+
+test("spending-only history counts toward completeness but not received value", async () => {
+  const store = new Store(":memory:");
+  try {
+    await syncDojo(store, config, fakeDojo().api);
+    store.allocate(id(0), 0, derive);
+    const { api } = fakeDojo([{ index: 0, height: 10 }]);
+    await syncDojo(store, config, async (path, form) => {
+      const response = await api(path, form) as { txs: Record<string, unknown>[] };
+      return { ...response, txs: response.txs.map(tx => ({
+        ...tx, out: [], inputs: [{ prev_out: { addr: derive(0) } }],
+      })) };
+    });
+    assert.equal(store.lastConfirmedPayment(), -1);
+    assert.equal(store.paymentStatus(id(0))?.confirmedSats, 0);
+  } finally { store.close(); }
 });

@@ -116,7 +116,8 @@ export function serve(store: Store, network: NetworkName): void {
 
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
-  server.timeout = 15000;
+  // Wallet RPC may take 120 seconds; keep response sockets alive through it.
+  server.timeout = 180000;
   server.maxHeadersCount = 30;
 
   server.listen(port, host, () => {
