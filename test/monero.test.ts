@@ -2,31 +2,50 @@ import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import fs, { mkdtempSync, rmSync } from "node:fs";
-import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Unavailable } from "../src/config.js";
 import {
-  MONERO, MONERO_RESERVATION, MONERO_PENDING_SETUP, MoneroSettings, XMR_GAP_LIMIT, allocateMonero, enableMonero,
+  MONERO, MoneroSettings, XMR_GAP_LIMIT, allocateMonero, enableMonero,
   callWallet, configuredMoneroSettings, disableMonero, moneroSettings, xmrBlocker,
-  formatXmr, moneroUri, parseXmrAmount, syncMonero, validateNode, recoverMonero, MoneroRpcError,
+  formatXmr, moneroUri, parseXmrAmount, syncMonero, validateNode, MoneroRpcError,
 } from "../src/monero.js";
+import { decodePrimaryAddress, deriveSubaddress } from "../src/monero-address.js";
 import { Store } from "../src/store.js";
 import { handleApi } from "../src/api.js";
 
-const PRIMARY = `5${"A".repeat(94)}`;
-const VIEW_KEY = "ab".repeat(32);
+// A throwaway stagenet wallet (see monero-address.test.ts).
+const PRIMARY = "5AUnubSxNrKNcaKrNGpDK66XM2d7H5wR963yVx5Ps6aKSbUVYZTxWD1AqqBYDDd3DiaNKt42RZNaZGTGv3cwtxV6Q8mzane";
+const VIEW_KEY = "a5ce85c7c6d283a529172b0c25938330c703e5c6590dfe9c5a0ccc145e087b02";
+// Its subaddresses 1/1 and 1/5, from the reference wallet.
+const SUB_1_1 = "78VE3oYkw34PwFvLepuvtnFzKg3hLTRJQVWaqXJt4xug1z6zJ3H63PEjhewEZsfknL4RiYfsqYNsVQM1i3GyJ6Z14dAQkGR";
+const SUB_1_5 = "7BphSzMDW9dbzgs3cmE21nJaQuzvDbjGtLctkmti24CB9xXN44o5fum5Hp2zcQPovkUNQwbnKPemj166cYrrRD3w1s2KpXS";
+// Another wallet's primary address (the mainnet vector's).
+const OTHER = "44ZSdpMPz8hNot7sLZfifG6A17W4n9EGHfTbQAobkg4EgQ6XcebTXxpNKT6tMAFcu66kdH4pYQFb6AiTYMX7F1fVMz8uSUp";
 
-// A stand-in for monero-wallet-rpc's JSON-RPC interface.
+const primary = decodePrimaryAddress(PRIMARY, "stagenet")!;
+const subaddress = (account: number, index: number) =>
+  deriveSubaddress(primary, VIEW_KEY, account, index, "stagenet");
+
+// A stand-in for monero-wallet-rpc's JSON-RPC interface. It watches
+// subaddresses 0..watched of each account, as the real wallet's lookahead.
 const wallet = {
   files: new Set<string>(),
   open: undefined as string | undefined,
   accounts: 1,
-  next: new Map<number, number>(),
+  watched: 200,
   transfers: { in: [] as unknown[], pool: [] as unknown[] },
   calls: [] as string[],
   daemon: undefined as unknown,
+};
+const cache = new Map<string, string>();
+const watchedIndex = (address: string) => {
+  for (const major of [1, 2]) {
+    for (let minor = 1; minor <= wallet.watched; minor++) {
+      const key = `${major}/${minor}`;
+      if (!cache.has(key)) cache.set(key, subaddress(major, minor));
+      if (cache.get(key) === address) return { major, minor };
+    }
+  }
+  return undefined;
 };
 let server: Server;
 
@@ -56,7 +75,7 @@ before(async () => {
         }
         wallet.files.add(file);
         wallet.open = file;
-        wallet.next.clear();
+        wallet.accounts = 1;
         return reply({ address: PRIMARY, info: "" });
       }
       case "open_wallet":
@@ -66,14 +85,13 @@ before(async () => {
         wallet.open = String(params.filename);
         return reply({});
       case "store": return reply({});
-      case "get_address": return reply({ address: PRIMARY,
-        addresses: Array.from({ length: (wallet.next.get(Number(params.account_index)) ?? 0) + 1 },
-          (_, address_index) => ({ address_index,
-            address: `7${String(params.account_index)}${String(address_index).padStart(93, "x")}` })),
-      });
-      case "get_height":
-        if (!wallet.open) return fail(-13, "No wallet file");
-        return reply({ height: 1700000 });
+      case "get_address": return reply({ address: PRIMARY, addresses: [] });
+      case "get_address_index": {
+        const index = watchedIndex(String(params.address));
+        return index ? reply({ index })
+          : fail(-2, "Address doesn't belong to the wallet");
+      }
+      case "get_height": return reply({ height: 1700000 });
       case "get_accounts":
         return reply({ subaddress_accounts: Array.from(
           { length: wallet.accounts }, (_, account_index) => ({ account_index }),
@@ -81,15 +99,6 @@ before(async () => {
       case "create_account":
         wallet.accounts++;
         return reply({ account_index: wallet.accounts - 1 });
-      case "create_address": {
-        const account = Number(params.account_index);
-        const index = (wallet.next.get(account) ?? 0) + 1;
-        wallet.next.set(account, index);
-        return reply({
-          address: `7${String(account)}${String(index).padStart(93, "x")}`,
-          address_index: index,
-        });
-      }
       case "get_transfers": return reply(wallet.transfers);
       default: return fail(-32601, `Method not found: ${method}`);
     }
@@ -103,39 +112,10 @@ before(async () => {
 after(() => server.close());
 
 const node = `${"n".repeat(56)}.onion:18081`;
+const keys = { address: PRIMARY, viewKey: VIEW_KEY, node };
 
-test("ownership works without a container machine-id", async t => {
-  const original = fs.readFileSync;
-  t.mock.method(fs, "readFileSync", (...args: Parameters<typeof fs.readFileSync>) => {
-    if (args[0] === "/etc/machine-id") {
-      throw Object.assign(new Error("missing"), { code: "ENOENT" });
-    }
-    return original(...args);
-  });
-  syncBuiltinESMExports();
-  const store = new Store(":memory:");
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    await allocateMonero(store, "container_missing_id", 0);
-  } finally {
-    store.close();
-    t.mock.restoreAll();
-    syncBuiltinESMExports();
-  }
-});
-
-test("queued identical IDs re-read the committed mapping", async () => {
-  const store = new Store(":memory:");
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    const before = wallet.calls.filter(c => c === "create_address").length;
-    const results = await Promise.all(Array.from({ length: 3 }, () =>
-      allocateMonero(store, "queued_identical_id", 1)));
-    assert.deepEqual(results[0], results[1]);
-    assert.deepEqual(results[0], results[2]);
-    assert.equal(wallet.calls.filter(c => c === "create_address").length, before + 1);
-  } finally { store.close(); }
-});
+// Wallet calls that would change it; issuing must make none.
+const MUTATIONS = ["generate_from_keys", "create_account", "create_address", "store"];
 
 test("RPC outages are unavailable, not invalid caller input", async () => {
   const url = process.env.NYM_MONERO_RPC;
@@ -144,99 +124,6 @@ test("RPC outages are unavailable, not invalid caller input", async () => {
     await assert.rejects(callWallet("get_height"), Unavailable);
   } finally { process.env.NYM_MONERO_RPC = url; }
   assert.ok(new MoneroRpcError(-1, "wallet failure") instanceof Unavailable);
-});
-
-test("committed retries need neither enabled issuance nor an available wallet", async () => {
-  const store = new Store(":memory:");
-  const offline = async () => { assert.fail("committed retry called RPC"); };
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    const id = "committed_retry_001";
-    const allocation = await allocateMonero(store, id, 1);
-    assert.deepEqual(await allocateMonero(store, id, 1, offline), allocation);
-    disableMonero(store);
-    store.replace(MONERO_RESERVATION, { requestId: "unrelated", amountAtomic: 0 });
-    assert.deepEqual(await allocateMonero(store, id, 1, offline), allocation);
-    await assert.rejects(allocateMonero(store, id, 2, offline), /different amount/);
-    await assert.rejects(allocateMonero(store, id, -1, offline), /amountAtomic/);
-  } finally { store.close(); }
-});
-
-test("queued committed retries return after disable without RPC", async () => {
-  const store = new Store(":memory:");
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    const id = "queued_disabled_001";
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const first = assert.rejects(allocateMonero(store, id, 1, async (method, params) => {
-      if (method === "store") {
-        await gate;
-        disableMonero(store);
-      }
-      return callWallet(method, params);
-    }), /disabled/);
-    const retry = allocateMonero(store, id, 1, async () => {
-      assert.fail("queued committed retry called RPC");
-    });
-    release();
-    await first;
-    assert.deepEqual(await retry, store.findXmr(id));
-    assert.equal(store.get(MONERO_RESERVATION, MoneroSettings.pick({}).passthrough()), undefined);
-  } finally { store.close(); }
-});
-
-test("daemon configuration retries on an already reopened wallet", async () => {
-  const store = new Store(":memory:");
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    wallet.open = undefined;
-    wallet.daemon = undefined;
-    await assert.rejects(syncMonero(store, async (method, params) => {
-      if (method === "set_daemon") throw new Error("daemon unavailable");
-      return callWallet(method, params);
-    }), /daemon unavailable/);
-    assert.ok(wallet.open);
-    assert.equal(wallet.daemon, undefined);
-    await syncMonero(store);
-    assert.ok(wallet.daemon);
-    wallet.daemon = undefined;
-    await allocateMonero(store, "daemon_retry_000001", 0);
-    assert.ok(wallet.daemon);
-    for (const operation of [syncMonero, (s: Store, rpc: typeof callWallet) =>
-      allocateMonero(s, "wrong_wallet_00001", 0, rpc)]) {
-      wallet.open = undefined;
-      await assert.rejects(operation(store, async (method, params) => {
-        assert.notEqual(method, "set_daemon", "must verify identity before configuring daemon");
-        if (method === "get_address") return { address: "wrong wallet" };
-        return callWallet(method, params);
-      }), /different address/);
-    }
-  } finally { store.close(); }
-});
-
-test("recovered burned indices block issuance without contacting the wallet", async () => {
-  const store = new Store(":memory:");
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    await assert.rejects(allocateMonero(store, "burned_indices_001", 0, async (method, params) => {
-      const result = await callWallet(method, params);
-      if (method === "create_address") {
-        wallet.next.set(1, XMR_GAP_LIMIT);
-        throw new Error("lost response");
-      }
-      return result;
-    }), /lost response/);
-    await recoverMonero(store, { otherProcessesStopped: true });
-    assert.deepEqual(store.xmrIndices(), []);
-    assert.match(xmrBlocker(store)!, /paused/);
-    await assert.rejects(allocateMonero(store, "burned_indices_002", 0, async () => {
-      assert.fail("persisted gap should block before RPC");
-    }), /index gap/);
-    store.recordXmrReceived(XMR_GAP_LIMIT, 0, 1);
-    assert.equal(xmrBlocker(store), undefined);
-    await allocateMonero(store, "burned_indices_002", 0);
-  } finally { store.close(); }
 });
 
 test("mainnet nodes must be onion or local", () => {
@@ -268,44 +155,43 @@ test("XMR amounts and URIs use exact piconero", () => {
   assert.throws(() => parseXmrAmount("1e3"));
 });
 
-test("enabling creates a view-only wallet and a dedicated account", async () => {
+test("enabling checks the keys locally, then sets up the watch wallet", async () => {
   const store = new Store(":memory:");
   try {
+    wallet.calls = [];
+    // A view key from another wallet is refused before the wallet is asked.
     await assert.rejects(enableMonero(store, "testnet4", {
-      address: PRIMARY, viewKey: "cd".repeat(32), node,
-    }), /refused the keys/);
+      ...keys, viewKey: "cd".repeat(31) + "0c",
+    }), /does not belong/);
+    await assert.rejects(enableMonero(store, "testnet4", {
+      ...keys, address: PRIMARY.slice(0, 94) + (PRIMARY.endsWith("e") ? "f" : "e"),
+    }), /check for typos/);
+    assert.equal(wallet.calls.length, 0);
     assert.equal(configuredMoneroSettings(store), undefined);
-    assert.equal(moneroSettings(store), undefined);
 
     const settings = await enableMonero(store, "testnet4", {
-      address: PRIMARY, viewKey: VIEW_KEY, node, restoreHeight: 1600000,
+      ...keys, restoreHeight: 1600000,
     });
     assert.equal(settings.network, "stagenet");
     assert.equal(settings.account, 1);
-    assert.equal(wallet.calls.at(-1), "store");
+    assert.equal(settings.viewKey, VIEW_KEY);
     assert.equal(wallet.accounts, 2);
     assert.deepEqual(wallet.daemon, {
       address: node, trusted: false, ssl_support: "disabled", proxy: "tor:9050",
     });
-    // The view key is handed to the wallet, never stored by Tekiya.
-    assert.ok(!JSON.stringify(store.get(MONERO, MoneroSettings)).includes(VIEW_KEY));
 
-    // Enabling again reopens the same wallet; another address is refused.
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
+    // Enabling again reopens the same wallet; changes of wallet are refused.
+    await enableMonero(store, "testnet4", keys);
     assert.ok(wallet.calls.includes("open_wallet"));
-    await assert.rejects(enableMonero(store, "testnet4", {
-      address: PRIMARY, viewKey: VIEW_KEY, node, account: 2,
-    }), /account cannot change/);
-    await assert.rejects(enableMonero(store, "testnet4", {
-      address: `5${"B".repeat(94)}`, viewKey: VIEW_KEY, node,
-    }), /another address/);
+    await assert.rejects(enableMonero(store, "testnet4", { ...keys, account: 2 }),
+      /account cannot change/);
     assert.throws(() => validateNode("example.org", "mainnet"));
 
     // A clearnet stagenet node is set up with the Tor proxy.
     const other = new Store(":memory:");
     try {
       await enableMonero(other, "testnet4", {
-        address: PRIMARY, viewKey: VIEW_KEY, node: "stagenet.community.rino.io:38081",
+        ...keys, node: "stagenet.community.rino.io:38081",
       });
       assert.deepEqual(wallet.daemon, {
         address: "stagenet.community.rino.io:38081", trusted: false,
@@ -319,109 +205,87 @@ test("enabling creates a view-only wallet and a dedicated account", async () => 
   }
 });
 
-test("first enable preserves recovery credentials and reservation when wallet store fails", async () => {
+test("a failed setup step is simply retried with the same wallet", async () => {
   const store = new Store(":memory:");
-  let created: { filename: string; password: string } | undefined;
   try {
-    await assert.rejects(enableMonero(store, "testnet4", {
-      address: PRIMARY, viewKey: VIEW_KEY, node,
-    }, async (method, params) => {
-      const result = await callWallet(method, params);
-      if (method === "generate_from_keys") {
-        created = params as { filename: string; password: string };
-      }
-      if (method === "store") throw new Error("lost store response");
-      return result;
-    }), /lost store response/);
-    assert.ok(created);
-    assert.ok(wallet.files.has(created.filename));
-    const settings = store.get(MONERO_PENDING_SETUP, MoneroSettings);
-    assert.ok(settings);
-    assert.equal(settings.enabled, false);
-    assert.equal(settings.walletFile, created.filename);
-    assert.equal(settings.walletPassword, created.password);
-    assert.ok(settings.walletPassword);
-    assert.equal(moneroSettings(store), undefined);
-    const reservation = store.get(MONERO_RESERVATION, MoneroSettings.pick({}).passthrough());
-    assert.equal(reservation?.phase, "mutation");
-    assert.equal(reservation?.active, false);
-    await assert.rejects(enableMonero(store, "testnet4", {
-      address: PRIMARY, viewKey: VIEW_KEY, node,
-    }), /reserved/);
+    const files = wallet.files.size;
+    await assert.rejects(enableMonero(store, "testnet4", keys, async (method, params) => {
+      if (method === "set_daemon") throw new Unavailable("node unreachable");
+      return callWallet(method, params);
+    }), /node unreachable/);
     assert.equal(configuredMoneroSettings(store), undefined);
-    assert.deepEqual(store.get(MONERO_RESERVATION,
-      MoneroSettings.pick({}).passthrough()), reservation);
-  } finally {
-    store.close();
-  }
+    await enableMonero(store, "testnet4", keys);
+    assert.equal(wallet.files.size, files + 1);
+    assert.ok(moneroSettings(store));
+  } finally { store.close(); }
 });
 
-test("sync and allocation queue behind live owners", async () => {
-  const store = new Store(":memory:");
-  let release!: () => void;
-  let pending: ReturnType<typeof allocateMonero> | undefined;
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    const reservationSchema = MoneroSettings.pick({}).passthrough();
-    const result = await syncMonero(store);
-    assert.equal(result?.height, 1700000);
-    assert.equal(store.get(MONERO_RESERVATION, reservationSchema), undefined);
-
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    pending = allocateMonero(store, "order_sync_00000001", 1, async (method, params) => {
-      if (method === "get_height") await gate;
-      return callWallet(method, params);
-    });
-    const held = store.get(MONERO_RESERVATION, reservationSchema);
-    assert.equal(held?.requestId, "order_sync_00000001");
-    const queued = syncMonero(store);
-    assert.deepEqual(store.get(MONERO_RESERVATION, reservationSchema), held);
-    release();
-    await pending;
-    await queued;
-    assert.equal(store.get(MONERO_RESERVATION, reservationSchema), undefined);
-  } finally {
-    release?.();
-    await pending;
-    store.close();
-  }
-});
-
-test("failed refresh releases its own read reservation and permits retry", async () => {
+test("issuing derives the address and never changes the wallet", async () => {
   const store = new Store(":memory:");
   try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    await allocateMonero(store, "order_refresh_000001", 1);
-    await assert.rejects(syncMonero(store, async (method, params) => {
-      assert.equal(store.get(MONERO_RESERVATION,
-        MoneroSettings.pick({}).passthrough())?.requestId, "refresh");
-      if (method === "get_transfers") throw new Error("failed transfer read");
-      return callWallet(method, params);
-    }), /failed transfer read/);
-    assert.equal(store.get(MONERO_RESERVATION,
-      MoneroSettings.pick({}).passthrough()), undefined);
-    assert.equal((await syncMonero(store))?.height, 1700000);
-    await allocateMonero(store, "order_refresh_000002", 1);
-  } finally {
-    store.close();
-  }
-});
-
-test("subaddresses are issued once per request and paid at 10 confirmations", async () => {
-  const store = new Store(":memory:");
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
+    await enableMonero(store, "testnet4", keys);
+    wallet.calls = [];
     const first = await allocateMonero(store, "order_xmr_000000001", 50_000_000_000);
-    assert.equal(wallet.calls.at(-1), "store");
-    assert.deepEqual(
-      await allocateMonero(store, "order_xmr_000000001", 50_000_000_000), first,
-    );
-    await assert.rejects(
-      allocateMonero(store, "order_xmr_000000001", 1), /different amount/,
-    );
-    const second = await allocateMonero(store, "order_xmr_000000002", 0);
-    assert.notEqual(second.address, first.address);
+    assert.equal(first.subaddr_index, 1);
+    assert.equal(first.address, SUB_1_1);
+    for (let i = 2; i <= 5; i++) {
+      await allocateMonero(store, `order_xmr_00000000${i}`, 0);
+    }
+    assert.equal(store.findXmr("order_xmr_000000005")?.address, SUB_1_5);
+    assert.deepEqual(wallet.calls.filter(call => MUTATIONS.includes(call)), []);
+  } finally { store.close(); }
+});
 
+test("requests are idempotent and concurrent requests get distinct indices", async () => {
+  const store = new Store(":memory:");
+  const offline = async () => { assert.fail("committed retry called RPC"); };
+  try {
+    await enableMonero(store, "testnet4", keys);
+    const same = await Promise.all(Array.from({ length: 3 }, () =>
+      allocateMonero(store, "queued_identical_id", 1)));
+    assert.deepEqual(same[0], same[1]);
+    assert.deepEqual(same[0], same[2]);
+    const distinct = await Promise.all(Array.from({ length: 4 }, (_, i) =>
+      allocateMonero(store, `concurrent_order_${i}`, 0)));
+    assert.deepEqual(
+      [...new Set(distinct.map(a => a.subaddr_index))].sort(), [2, 3, 4, 5],
+    );
+    // A committed request needs neither the wallet nor enabled issuance.
+    disableMonero(store);
+    assert.deepEqual(await allocateMonero(store, "queued_identical_id", 1, offline), same[0]);
+    await assert.rejects(allocateMonero(store, "queued_identical_id", 2, offline), /different amount/);
+    await assert.rejects(allocateMonero(store, "queued_identical_id", -1, offline), /amountAtomic/);
+    await assert.rejects(allocateMonero(store, "new_order_disabled", 0, offline), Unavailable);
+  } finally { store.close(); }
+});
+
+test("an address the wallet does not watch is not issued", async () => {
+  const store = new Store(":memory:");
+  try {
+    await enableMonero(store, "testnet4", keys);
+    await assert.rejects(allocateMonero(store, "unwatched_order_001", 0, async (method, params) => {
+      if (method === "get_address_index") throw new MoneroRpcError(-2, "Address doesn't belong to the wallet");
+      return callWallet(method, params);
+    }), (error: unknown) => error instanceof Unavailable && /does not watch/.test(String(error)));
+    await assert.rejects(allocateMonero(store, "mismatch_order_0001", 0, async (method, params) => {
+      if (method === "get_address_index") return { index: { major: 1, minor: 7 } };
+      return callWallet(method, params);
+    }), /does not match/);
+    assert.deepEqual(store.xmrIndices(), []);
+    // A wallet outage leaves nothing behind: the next try just works.
+    await assert.rejects(allocateMonero(store, "outage_order_00001", 0, async () => {
+      throw new Unavailable("The Monero wallet service is not reachable");
+    }), /not reachable/);
+    assert.equal((await allocateMonero(store, "outage_order_00001", 0)).subaddr_index, 1);
+  } finally { store.close(); }
+});
+
+test("subaddresses are paid at 10 confirmations", async () => {
+  const store = new Store(":memory:");
+  try {
+    await enableMonero(store, "testnet4", keys);
+    const first = await allocateMonero(store, "order_xmr_000000001", 50_000_000_000);
+    const second = await allocateMonero(store, "order_xmr_000000002", 0);
     wallet.transfers = {
       in: [
         { amount: 30_000_000_000, confirmations: 12,
@@ -441,11 +305,11 @@ test("subaddresses are issued once per request and paid at 10 confirmations", as
     assert.equal(status?.state, "seen");
     assert.equal(store.xmrPaymentStatus("order_xmr_000000002")?.state, "seen");
 
+    // Monitoring continues while issuing is switched off.
     wallet.transfers.in[1] = { amount: 20_000_000_000, confirmations: 10,
       subaddr_index: { major: 1, minor: first.subaddr_index } };
     disableMonero(store);
     assert.equal(moneroSettings(store), undefined);
-    assert.equal(configuredMoneroSettings(store)?.enabled, false);
     await syncMonero(store);
     status = store.xmrPaymentStatus("order_xmr_000000001");
     assert.equal(status?.state, "paid");
@@ -455,101 +319,53 @@ test("subaddresses are issued once per request and paid at 10 confirmations", as
   }
 });
 
-test("reservations serialize callers, reject amount conflicts, and fail closed on RPC failure", async () => {
-  const store = new Store(":memory:");
-  const other = new Store(":memory:");
-  try {
-    const settings = await enableMonero(store, "testnet4", {
-      address: PRIMARY, viewKey: VIEW_KEY, node,
-    });
-    other.replace(MONERO, settings);
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const id = "order_lock_00000001";
-    const pending = allocateMonero(store, id, 1, async (method, params) => {
-      if (method === "get_height") await gate;
-      return callWallet(method, params);
-    });
-    await assert.rejects(allocateMonero(store, id, 2), /different amount/);
-    const queued = allocateMonero(store, "order_lock_00000002", 1);
-    // Identical ids in separate databases must not share an in-memory promise.
-    const separate = await allocateMonero(other, id, 2);
-    assert.equal(separate.amount_atomic, 2);
-    release();
-    assert.equal((await pending).amount_atomic, 1);
-    await queued;
-    await assert.rejects(allocateMonero(store, "order_crash_0000001", 0,
-      async (method, params) => {
-        if (method === "store") throw new Error("simulated crash before save");
-        return callWallet(method, params);
-      }), /simulated crash/);
-    assert.ok(store.get(MONERO_RESERVATION, MoneroSettings.pick({}).passthrough()));
-    await assert.rejects(allocateMonero(store, "order_crash_0000002", 0), /reserved/);
-    assert.equal(store.findXmr("order_crash_0000001"), undefined);
-  } finally {
-    store.close();
-    other.close();
-  }
-});
-
-test("skipped wallet indices count toward the gap even without allocation rows", async () => {
-  const store = new Store(":memory:");
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    wallet.next.set(1, XMR_GAP_LIMIT);
-    const before = wallet.calls.filter(c => c === "create_address").length;
-    await assert.rejects(allocateMonero(store, "order_skipped_00001", 0), /index gap/);
-    assert.equal(wallet.calls.filter(c => c === "create_address").length, before);
-  } finally {
-    store.close();
-  }
-});
-
-test("a failed reservation survives database reopen and excludes another connection", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "tekiya-monero-"));
-  const path = join(dir, "store.sqlite");
-  let store = new Store(path);
-  const other = new Store(path);
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    await assert.rejects(allocateMonero(store, "order_durable_00001", 1,
-      async (method, params) => {
-        const result = await callWallet(method, params);
-        if (method === "create_address") throw new Error("lost RPC response");
-        return result;
-      }), /lost RPC/);
-    await assert.rejects(allocateMonero(other, "order_durable_00002", 0), /reserved/);
-    store.close();
-    store = new Store(path);
-    await assert.rejects(allocateMonero(store, "order_durable_00001", 2), /different amount/);
-    await assert.rejects(allocateMonero(store, "order_durable_00002", 0), /reserved/);
-  } finally {
-    store.close();
-    other.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test("Monero pauses after a long run of unpaid subaddresses", async () => {
   const store = new Store(":memory:");
   try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
+    await enableMonero(store, "testnet4", keys);
     for (let i = 1; i <= XMR_GAP_LIMIT; i++) {
       store.insertXmr({
         request_id: `bulk_${String(i).padStart(12, "0")}`, subaddr_index: i,
-        address: `71${String(i).padStart(93, "x")}`, amount_atomic: 0, created_at: "now",
+        address: `fake-${i}`, amount_atomic: 0, created_at: "now",
       });
     }
+    assert.match(xmrBlocker(store)!, /paused/);
     await assert.rejects(
       allocateMonero(store, "order_xmr_000000099", 0),
       (error: unknown) => error instanceof Unavailable,
     );
-    wallet.next.set(1, XMR_GAP_LIMIT);
     store.recordXmrReceived(XMR_GAP_LIMIT, 1, 0);
-    await allocateMonero(store, "order_xmr_000000099", 0);
+    assert.equal(xmrBlocker(store), undefined);
+    const next = await allocateMonero(store, "order_xmr_000000099", 0);
+    assert.equal(next.subaddr_index, XMR_GAP_LIMIT + 1);
+    assert.equal(next.address, subaddress(1, XMR_GAP_LIMIT + 1));
   } finally {
     store.close();
   }
+});
+
+test("installations without a stored view key ask for it once", async () => {
+  const store = new Store(":memory:");
+  try {
+    const settings = await enableMonero(store, "testnet4", keys);
+    const issued = await allocateMonero(store, "legacy_order_00001", 0);
+    const { viewKey: _, ...legacy } = settings;
+    store.replace(MONERO, legacy);
+    assert.match(xmrBlocker(store)!, /Re-enter the view key/);
+    await assert.rejects(allocateMonero(store, "legacy_order_00002", 0), /Re-enter/);
+    // Payments to issued addresses are still followed.
+    assert.ok(await syncMonero(store));
+
+    // Keys that do not derive the issued addresses are refused.
+    store.db.prepare("UPDATE xmr_allocations SET address = 'other' WHERE request_id = ?")
+      .run(issued.request_id);
+    await assert.rejects(enableMonero(store, "testnet4", keys), /already issued/);
+    store.db.prepare("UPDATE xmr_allocations SET address = ? WHERE request_id = ?")
+      .run(issued.address, issued.request_id);
+    await enableMonero(store, "testnet4", keys);
+    assert.equal(xmrBlocker(store), undefined);
+    assert.equal((await allocateMonero(store, "legacy_order_00002", 0)).subaddr_index, 2);
+  } finally { store.close(); }
 });
 
 test("the API creates and reports Monero requests", async () => {
@@ -561,7 +377,7 @@ test("the API creates and reports Monero requests", async () => {
       merchantCode: "PM8TJSBiQmNQDwTk6zLRcXjYJdaMpq9wzv9n6hhxStX4Fm2nLKbbgVDE9nDGpKVSvBnmaaEXFnBbHQyn9Wf6ExUBpe8QgjWyRqWWQwGEqXaGw7WSvMXN",
       onion: `http://${"a".repeat(56)}.onion`, apiToken: "33".repeat(32),
     });
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
+    await enableMonero(store, "testnet4", keys);
     await new Promise<void>(done => api.listen(0, "127.0.0.1", done));
     const base = `http://127.0.0.1:${(api.address() as AddressInfo).port}`;
     const headers = {
@@ -576,7 +392,8 @@ test("the API creates and reports Monero requests", async () => {
     assert.equal(created.asset, "XMR");
     assert.equal(created.network, "stagenet");
     assert.equal(created.status, "pending");
-    assert.match(String(created.uri), /^monero:7.*\?tx_amount=0\.05$/);
+    assert.equal(created.address, SUB_1_1);
+    assert.equal(created.uri, `monero:${SUB_1_1}?tx_amount=0.05`);
 
     const read = await (await fetch(
       `${base}/v1/payment-requests/order_api_xmr_0001`, { headers },
@@ -597,7 +414,7 @@ test("the API creates and reports Monero requests", async () => {
 test("a restarted wallet service is reopened before use", async () => {
   const store = new Store(":memory:");
   try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
+    await enableMonero(store, "testnet4", keys);
     wallet.open = undefined;
     wallet.daemon = undefined;
     wallet.calls = [];
@@ -606,119 +423,31 @@ test("a restarted wallet service is reopened before use", async () => {
     const daemon = wallet.calls.indexOf("set_daemon");
     assert.ok(open >= 0 && daemon > open, wallet.calls.join(","));
     assert.ok(wallet.daemon);
+    // A different wallet behind the same file is refused before use.
+    wallet.open = undefined;
+    await assert.rejects(syncMonero(store, async (method, params) => {
+      if (method === "get_address") return { address: OTHER };
+      return callWallet(method, params);
+    }), /different address/);
   } finally {
     store.close();
   }
 });
 
-test("invalid restore heights write nothing; unknown setup RPC errors stay pending", async () => {
+test("invalid restore heights are refused", async () => {
   const store = new Store(":memory:");
   try {
     for (const restoreHeight of [-1, 1.5, NaN, Infinity]) {
-      await assert.rejects(enableMonero(store, "testnet4", {
-        address: PRIMARY, viewKey: VIEW_KEY, node, restoreHeight,
-      }), /Restore height/);
-      assert.equal(store.get(MONERO_PENDING_SETUP, MoneroSettings), undefined);
-      assert.equal(store.get(MONERO_RESERVATION, MoneroSettings.pick({}).passthrough()), undefined);
+      await assert.rejects(enableMonero(store, "testnet4", { ...keys, restoreHeight }),
+        /Restore height/);
     }
-    await assert.rejects(enableMonero(store, "testnet4", {
-      address: PRIMARY, viewKey: VIEW_KEY, node,
-    }, async () => { throw new MoneroRpcError(-1, "disk error after creation"); }), /disk error/);
     assert.equal(configuredMoneroSettings(store), undefined);
-    assert.ok(store.get(MONERO_PENDING_SETUP, MoneroSettings));
-    await assert.rejects(syncMonero(store), /reconciliation/);
   } finally { store.close(); }
 });
 
-test("read owners are reclaimed only when dead; reviewed recovery handles foreign namespaces", async () => {
-  const store = new Store(":memory:");
-  const schema = MoneroSettings.pick({}).passthrough();
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    let reservation: Record<string, unknown> | undefined;
-    await assert.rejects(allocateMonero(store, "read_failure_000001", 0, async () => {
-      reservation = store.get(MONERO_RESERVATION, schema);
-      throw new Error("read failed");
-    }), /read failed/);
-    assert.equal(store.get(MONERO_RESERVATION, schema), undefined);
-    const owner = reservation!.owner as Record<string, unknown>;
-    store.replace(MONERO_RESERVATION, { ...reservation, phase: "mutation" });
-    await assert.rejects(recoverMonero(store, { otherProcessesStopped: true }), /may still be running/);
-    store.replace(MONERO_RESERVATION, { ...reservation, owner: { ...owner, start: "not-this-process" } });
-    await allocateMonero(store, "reclaimed_read_0001", 0);
-    store.replace(MONERO_RESERVATION, { ...reservation, phase: "mutation",
-      owner: { ...owner, host: "another-host" } });
-    await recoverMonero(store, { otherProcessesStopped: true });
-    assert.equal(store.get(MONERO_RESERVATION, schema), undefined);
-  } finally { store.close(); }
-});
-
-test("recovery saves uncertain allocations and burns indices, never blindly clears", async () => {
-  const store = new Store(":memory:");
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    await assert.rejects(allocateMonero(store, "uncertain_create_001", 1, async (method, params) => {
-      const result = await callWallet(method, params);
-      if (method === "create_address") throw new Error("lost response");
-      return result;
-    }), /lost response/);
-    await assert.rejects(recoverMonero(store, { otherProcessesStopped: true }, async (method, params) => {
-      if (method === "get_address") return { address: "wrong wallet", addresses: [] };
-      return callWallet(method, params);
-    }), /different address/);
-    await assert.rejects(recoverMonero(store, { otherProcessesStopped: true }, async (method, params) => {
-      if (method === "store") throw new Error("save failed");
-      return callWallet(method, params);
-    }), /save failed/);
-    await recoverMonero(store, { otherProcessesStopped: true });
-    assert.equal(store.findXmr("uncertain_create_001"), undefined);
-    assert.equal((await allocateMonero(store, "after_recovery_0001", 0)).subaddr_index, 2);
-    await assert.rejects(allocateMonero(store, "uncertain_create_002", 0, async (method, params) => {
-      if (method === "create_address") throw new Error("not sent");
-      return callWallet(method, params);
-    }), /not sent/);
-    await assert.rejects(recoverMonero(store, { otherProcessesStopped: true }), /not present/);
-  } finally { store.close(); }
-});
-
-test("wallet identity and stored mappings are verified for issuance and monitoring", async () => {
-  const store = new Store(":memory:");
-  try {
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    await allocateMonero(store, "identity_check_0001", 0);
-    const badMapping = async (method: string, params?: object) => {
-      if (method === "get_address" && (params as { account_index: number }).account_index === 1) {
-        return { addresses: [{ address_index: 0, address: "wrong" }] };
-      }
-      return callWallet(method, params);
-    };
-    await assert.rejects(syncMonero(store, badMapping), /mapping/);
-    await assert.rejects(allocateMonero(store, "identity_check_0002", 0, badMapping), /mapping/);
-    await syncMonero(store);
-  } finally { store.close(); }
-});
-
-test("disable wins against in-flight enable and allocation", async () => {
-  const store = new Store(":memory:");
-  try {
-    const settings = await enableMonero(store, "testnet4", {
-      address: PRIMARY, viewKey: VIEW_KEY, node,
-    }, async (method, params) => {
-      if (method === "store") disableMonero(store);
-      return callWallet(method, params);
-    });
-    assert.equal(settings.enabled, false);
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    await assert.rejects(allocateMonero(store, "disable_race_000001", 0, async (method, params) => {
-      if (method === "get_height") disableMonero(store);
-      return callWallet(method, params);
-    }), /disabled/);
-    assert.equal(store.findXmr("disable_race_000001"), undefined);
-    await enableMonero(store, "testnet4", { address: PRIMARY, viewKey: VIEW_KEY, node });
-    await assert.rejects(allocateMonero(store, "disable_race_000002", 0, async (method, params) => {
-      if (method === "store") disableMonero(store);
-      return callWallet(method, params);
-    }), /disabled/);
-    assert.ok(store.findXmr("disable_race_000002"));
-  } finally { store.close(); }
+test("settings stay readable", () => {
+  assert.ok(MoneroSettings.safeParse({
+    enabled: true, address: PRIMARY, network: "stagenet", node, account: 1,
+    restoreHeight: 0, walletFile: "w", walletPassword: "p", enabledAt: "now",
+  }).success);
 });

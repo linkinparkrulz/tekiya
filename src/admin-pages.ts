@@ -511,11 +511,12 @@ function moneroCard(view: View): string {
     return `<details class="card"${"viewKey" in draft || "address" in draft
       ? " open" : ""}><summary>Monero
 (optional)</summary>
-<p>Accept Monero too. Tekiya runs a view-only wallet from your primary
-address and private view key: it gives each payment a fresh subaddress and
-sees incoming payments, but cannot spend.</p>
-<div class="notice">A view key shows this server every payment your wallet
-receives. Use a dedicated wallet, or at least a dedicated account.</div>
+<p>Accept Monero too. From your primary address and private view key,
+Tekiya works out a fresh subaddress for each payment, and a view-only
+watcher sees incoming payments. Neither can spend.</p>
+<div class="notice">The view key is kept on this server and shows it every
+payment your wallet receives. Use a dedicated wallet, or at least a
+dedicated account.</div>
 ${settings ? `<p class="hint">Previously set up for
 <span class="mono">${escape(settings.address.slice(0, 12))}…</span>; enabling
 again reuses that wallet.</p>` : ""}

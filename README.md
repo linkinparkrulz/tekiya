@@ -60,7 +60,7 @@ notification transaction.
 
 ## Monero (optional)
 
-Start the view-only wallet service with
+Start the view-only watcher with
 `docker compose --profile monero up -d --build`, then open **Monero** in
 the dashboard and enter the wallet's primary address, private view key and
 a node (a `.onion` node, reached through Tor, or one on your own machine or
@@ -74,11 +74,20 @@ primary address (starts with `5`) and private view key (Wallet → Keys),
 and get stagenet coins from a faucet such as `stagenet-faucet.xmr-tw.org`
 (third-party).
 
-Tekiya creates a view-only `monero-wallet-rpc` wallet from those keys; the
-view key is passed to the wallet once and never stored by Tekiya. The
-wallet cannot spend. Each payment gets a fresh subaddress in a dedicated
-account (default 1), so Tekiya never hands out an address the merchant's
-wallet shows elsewhere; Monero wallets find payments to it on their own.
+Tekiya derives each payment's subaddress itself from the primary address
+and view key, the way any Monero wallet does, in a dedicated account
+(default 1), so it never hands out an address the merchant's wallet shows
+elsewhere. Monero wallets find payments to it on their own. Issuing an
+address changes nothing in any wallet, so there is nothing to keep in step
+or recover after a failure: a failed request is simply retried.
+
+To see payments, a view-only `monero-wallet-rpc` watches the chain. It is
+created from the same keys during setup and only reads; before each
+address is handed out, Tekiya checks that the watcher recognizes it.
+Nothing involved can spend. The view key is stored in Tekiya's database
+(and in the watcher's wallet file), so back up and protect that data like
+the rest of Tekiya's state. Installations set up before this change ask
+for the view key once more under **Monero** in the dashboard.
 In Feather, payments to Tekiya appear under that account in the account
 list, not in account 0.
 Payments count as paid after 10 confirmations, and issuing pauses after 150
@@ -175,19 +184,6 @@ transaction-history responses are rejected instead of replacing totals.
 
 Payment-page requests are capped at 1,000 persisted records per installation.
 Existing requests remain readable at the cap; records are not silently recycled.
-
-Monero wallet mutations are saved before allocations are exposed. An ambiguous
-mutation failure or crash leaves a durable `monero-reservation` and blocks further
-issuance. Keep the original idempotency key (or private payment link): failure
-does not prove that no subaddress was created. Stop every issuer and leave the
-reservation intact pending reviewed recovery. Stop all other Tekiya processes
-and wallet clients, then run `npm run cli -- monero-reconcile --recovery-reviewed`
-with access to the same database and wallet RPC. Recovery verifies wallet identity
-and address mappings, saves the wallet, and burns uncertain indices rather than
-reassigning them. Recovered setup stays disabled. Missing wallet data or legacy
-ownerless reservations require investigation; the command will not blindly clear
-them. Do not clear reservations manually merely to retry. Ordinary failed reads
-release their reservation; provably dead local read owners are recovered automatically.
 
 Bitcoin issuance and dashboard setup actions require a matching positive
 notification observation no older than ten minutes. The monitor refreshes this

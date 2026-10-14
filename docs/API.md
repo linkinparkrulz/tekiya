@@ -130,15 +130,11 @@ Errors return `{ "error": "<message>", "code": "<code>" }`.
 | 400 | `invalid_request` | Malformed body or headers, idempotency conflict. |
 | 401 | `unauthorized` | Missing or wrong bearer token. |
 | 404 | `not_found` | Unknown request id or endpoint. |
-| 503 | `unavailable` | Issuance is blocked: not set up or approved, halted, paused by lookahead, at the address limit, or a Monero wallet reservation needs reconciliation. `error` says which. |
+| 503 | `unavailable` | Issuance is blocked: not set up or approved, halted, paused by lookahead, at the address limit, or the Monero watcher is unreachable or does not yet watch the next subaddress. `error` says which. |
 
 A failed response, timeout, or lost connection does **not** prove that nothing
-was allocated. In particular, a Monero RPC mutation may have created a
-subaddress before its response or wallet save failed. Keep the original
-idempotency key, asset, and amount; read that request and retry with the same
-values, never a new key to bypass the failure. An ambiguous mutation leaves a
-durable reservation that may require operator reconciliation before retries
-can succeed. See the README recovery guidance; do not manually clear it.
+was allocated. Keep the original idempotency key, asset, and amount; read that
+request and retry with the same values, never a new key to bypass the failure.
 
 ## Limits to design around
 

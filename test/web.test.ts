@@ -82,7 +82,7 @@ test("web identity survives flags and currency switches; blocked admission consu
   store.register(0, deriveAddress(config, 0));
   const settings = {
     enabled: true, address: "5".repeat(95), network: "stagenet",
-    node: "localhost:38081", account: 1, restoreHeight: 0,
+    node: "localhost:38081", account: 1, restoreHeight: 0, viewKey: "ab".repeat(32),
     walletFile: "test", walletPassword: "secret", enabledAt: "now",
   };
   const server = createServer((req, res) => void handlePublic(req, res, store, "testnet4"));

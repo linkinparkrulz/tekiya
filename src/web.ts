@@ -326,9 +326,7 @@ export async function handlePublic(
       sendHtml(res, error instanceof Unavailable ? 503 : 400, message(site,
         error instanceof Unavailable ? "Temporarily unavailable" : "Request not accepted",
         (error instanceof Error ? error.message : "Request failed") +
-        " Keep this payment link and retry the same coin here, not a new form. " +
-        "A wallet RPC failure may have created a subaddress even without a response; " +
-        "the operator may need to reconcile it before issuance can resume.",
+        " Keep this payment link and retry here.",
         `/pay/${nonce}`));
     }
     return true;
