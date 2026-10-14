@@ -8,15 +8,14 @@ Not audited. Not wallet-interoperability tested. Start with testnet4.
 
 With Docker:
 
-Set `NYM_ADMIN_PASSWORD` in your shell or a local `.env` file to a unique,
-random password of at least 12 characters (for example, generate one with
-`openssl rand -hex 24`). Do not commit `.env` or share the password.
+No `.env` file or preconfigured password is needed. Testnet4 is the default.
 
     docker compose up -d --build
 
 Open http://127.0.0.1:8089 on the same machine (from elsewhere, tunnel it:
 `ssh -L 8089:127.0.0.1:8089 your-server`) and follow the setup. The
-dashboard asks for that password (any username) and walks through every step:
+dashboard first asks you to create an admin password, then walks through
+every step. Complete this first-run setup before sharing access:
 
 1. Paste your merchant wallet's payment code (either form; it is stored
    in SegWit form). The onion address is detected automatically. Tekiya
@@ -36,9 +35,11 @@ for the onion address, which Tor writes to
 `/var/lib/tor/nymdispenser/hostname`.
 
 The authenticated integration API is then available on the onion address.
-Anonymous payment creation stays disabled unless you explicitly set
-`NYM_PUBLIC_PAYMENTS=true` and recreate the app container. Name the payment
-page in the dashboard. Set `NYM_NETWORK=mainnet` only after testing on testnet4.
+Anonymous payment creation stays disabled until you enable public payments
+in the dashboard; no `.env` edit or container recreation is needed. Name the
+payment page there too. Network selection is not yet available in the GUI:
+set `NYM_NETWORK=mainnet` in the shell and recreate the containers only after
+testing on testnet4.
 
 ## PayNym directory
 
@@ -107,6 +108,8 @@ of Tekiya.
 The dashboard never appears on the onion service. `NYM_ADMIN_AUTH` sets
 who may reach it:
 
+- `setup` (Compose default): create the admin password in the first-run GUI,
+  then authenticate with it on subsequent visits.
 - `loopback` (default): `127.0.0.1` only, no password.
 - `password`: HTTP basic auth with `NYM_ADMIN_PASSWORD` (12+ characters),
   for a private network. Set `NYM_ADMIN_HOST=0.0.0.0`.
@@ -116,12 +119,16 @@ who may reach it:
   forwarder with no untrusted peers able to reach the listener. Not used by
   the bundled Compose file.
 
-Compose uses `password` mode and a host-loopback-only forwarder on a
-dedicated internal dashboard network. Tor and Monero do not join that
-network, but can still reach the app's admin listener on its shared private
-network; password authentication protects that path. Basic auth is not
-encrypted: keep the forwarder on localhost and use SSH tunnelling for
-remote access, not a public port or unencrypted LAN connection.
+Compose uses `setup` mode with `NYM_ADMIN_SOCKET=/run/tekiya-admin/admin.sock`
+instead of an admin TCP listener. The socket is mode `0600`, owned by the
+app user (UID 1000). Only the app and forwarder mount the `admin-socket`
+volume; the image initializes its directory ownership on first use. The
+forwarder runs as the same UID and publishes only `127.0.0.1:8089`.
+It alone joins the noninternal dashboard host-publishing network; the app
+joins only the internal private network, with no direct egress. Tor and
+Monero cannot access the admin socket. Dashboard HTTP is not encrypted:
+keep the forwarder on localhost and use SSH tunnelling for remote access,
+not a public port or unencrypted LAN connection.
 
 In `loopback` and `none` modes the Host header must be
 `127.0.0.1:PORT` or `localhost:PORT`; add others with `NYM_ADMIN_HOSTS`.
@@ -170,10 +177,22 @@ Payment-page requests are capped at 1,000 persisted records per installation.
 Existing requests remain readable at the cap; records are not silently recycled.
 
 Monero wallet mutations are saved before allocations are exposed. An ambiguous
-RPC failure or crash leaves a durable `monero-reservation` and blocks further
-issuance. To recover, stop every issuer, reconcile the wallet's account and
-subaddresses against SQLite allocations, save the wallet, and only then remove
-that settings record using SQLite tooling. Do not clear it merely to retry.
+mutation failure or crash leaves a durable `monero-reservation` and blocks further
+issuance. Keep the original idempotency key (or private payment link): failure
+does not prove that no subaddress was created. Stop every issuer and leave the
+reservation intact pending reviewed recovery. Stop all other Tekiya processes
+and wallet clients, then run `npm run cli -- monero-reconcile --recovery-reviewed`
+with access to the same database and wallet RPC. Recovery verifies wallet identity
+and address mappings, saves the wallet, and burns uncertain indices rather than
+reassigning them. Recovered setup stays disabled. Missing wallet data or legacy
+ownerless reservations require investigation; the command will not blindly clear
+them. Do not clear reservations manually merely to retry. Ordinary failed reads
+release their reservation; provably dead local read owners are recovered automatically.
+
+Bitcoin issuance and dashboard setup actions require a matching positive
+notification observation no older than ten minutes. The monitor refreshes this
+in the background. Missing, stale or unconfirmed observations pause new issuance;
+historical setup progress and previously issued requests are retained.
 
 The same lookups record confirmed payments. An address is issued only
 while it is within three indices of the last confirmed payment, matching
@@ -215,20 +234,23 @@ npm run cli -- COMMAND.
 
 ## Web pages
 
-With `NYM_PUBLIC_PAYMENTS=true`, `serve` publishes a payment form at `/` on
+With public payments enabled in the dashboard, `serve` publishes a payment form at `/` on
 the onion service. Visitors
 request a fresh address, optionally with an amount, and get the address,
 a QR code and a `bitcoin:` link at a private `/pay/...` URL. Pages use no
 JavaScript or external resources and work in Tor Browser's Safest mode.
 Resubmitting the form returns the same address.
+Every new request retains its original currency and amount, even when Monero
+is later enabled or disabled. Switching coins does not convert the amount:
+the other coin uses an unspecified amount. Existing allocations remain readable.
 
 Set the page's name and optional description in the dashboard or with
 `profile "Corner Café" "Support the community garden."` (name up to 80
 characters, description up to 280, plain text). Changes apply on the next
 page load; `profile --clear` restores the default "Pay with Bitcoin".
 
-`NYM_PUBLIC_PAYMENTS` defaults to `false`; only the exact value `true`
-enables anonymous requests and new coin allocations. Disabling it later
+Public payments are disabled by default. Enabling them allows anonymous
+requests and new coin allocations. Disabling them later
 leaves existing private `/pay/...` pages readable but prevents creation of
 new addresses there. The token-protected integration API is unaffected.
 
@@ -239,8 +261,9 @@ Abandoned requests and addresses are not recycled. Rate limiting alone
 cannot make irreversible anonymous allocation safe, including over Tor.
 Use the authenticated API unless you deliberately accept this risk.
 
-The operator dashboard listens on port 8089 (`NYM_ADMIN_PORT`; `0`
-disables it). After setup it shows issuance status, Dojo checks, issued
+Compose exposes the operator dashboard at `127.0.0.1:8089` through the Unix
+socket forwarder. Without a socket, the dashboard listens on port 8089
+(`NYM_ADMIN_PORT`; `0` disables it). After setup it shows issuance status, Dojo checks, issued
 addresses and confirmed payments, and lets you name the page, change
 Dojo, resume a halted installation and see the integration API token.
 
@@ -294,7 +317,9 @@ payment address. Customer payments go to the derived destination address.
 The database contains the plaintext dispenser seed, backend credentials,
 API token, identity approval, and address-allocation history.
 
-Stop all application processes before copying the full data directory.
+Backups remain an administrator operation, not a dashboard action.
+Stop all application processes before copying the full data directory
+(Compose: the `app-data` volume).
 Back up the onion identity separately (Compose: the `tor-data` volume).
 Store backups securely.
 

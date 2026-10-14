@@ -12,12 +12,59 @@ import {
   FeeChoice, approve, chosenRate, feeForRate, feePresets, fundingRequired,
   initialize, normalizeOnion, notificationConfirmed, parsePairing,
    recordNotificationConfirmed, usableFunding, confirmedNotification,
-   prepareNotification,
+   prepareNotification, NotificationHealth, NOTIFICATION_HEALTH,
+   cachedConfirmedNotification,
 } from "../src/setup.js";
 import { Store } from "../src/store.js";
 
 const onion = `${"a".repeat(56)}.onion`;
 const dojo = `http://${"d".repeat(56)}.onion`;
+
+test("cached confirmation requires current, fresh positive health, not historical progress", t => {
+  t.mock.method(Date, "now", () => Date.parse("2026-10-12T12:00:00Z"));
+  const store = new Store(":memory:");
+  try {
+    const code = createWallet("22".repeat(64), "testnet4").sender.toBase58();
+    const config = initialize(store, "testnet4", code, onion);
+    const funding = new Transaction();
+    funding.addInput(Buffer.alloc(32, 7), 0);
+    funding.addOutput(createWallet(config.seedHex, "testnet4").fundingScript, 50000n);
+    const pending = buildNotification(config, funding.toHex(), 0, 1000);
+    store.insert("notification", pending);
+    const check = () => cachedConfirmedNotification(store, config);
+    assert.throws(check, /verification pending/);
+    recordNotificationConfirmed(store);
+    assert.ok(notificationConfirmed(store));
+    assert.throws(check, /verification pending/);
+
+    const health = {
+      txid: pending.txid, pairingGeneration: store.pairingGeneration(),
+      confirmations: 1, checkedAt: new Date(Date.now()).toISOString(),
+    };
+    store.replace(NOTIFICATION_HEALTH, health);
+    assert.deepEqual(check(), pending);
+    store.replace(NOTIFICATION_HEALTH, {
+      ...health, checkedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    });
+    assert.deepEqual(check(), pending);
+
+    for (const change of [
+      { checkedAt: new Date(Date.now() - 10 * 60 * 1000 - 1).toISOString() },
+      { checkedAt: new Date(Date.now() + 1).toISOString() },
+      { checkedAt: "invalid" },
+      { confirmations: 0 },
+      { pairingGeneration: "other-pairing" },
+      { txid: "00".repeat(32) },
+    ]) {
+      store.replace(NOTIFICATION_HEALTH, { ...health, ...change });
+      assert.throws(check, /verification pending/, JSON.stringify(change));
+    }
+
+    store.replace(NOTIFICATION_HEALTH, health);
+    store.replace("notification", { ...pending, txid: "00".repeat(32) });
+    assert.throws(check, /reconstruction/);
+  } finally { store.close(); }
+});
 
 test("onion addresses are accepted with or without a scheme", () => {
   assert.equal(normalizeOnion(` ${onion}/ `), `http://${onion}`);
@@ -38,6 +85,7 @@ test("historical confirmation preserves progress but cannot bypass a fresh check
     await assert.rejects(confirmedNotification(store, config, async () => ({
       hex: pending.hex, confirmations: 0,
     })), /not confirmed yet/);
+    assert.equal(store.get(NOTIFICATION_HEALTH, NotificationHealth)?.confirmations, 0);
     await assert.rejects(confirmedNotification(store, config, async () => {
       throw new Error("offline");
     }), /offline/);
@@ -56,8 +104,14 @@ test("new preparation enforces the fee floor without persisting a rejected trans
     const funding = new Transaction();
     funding.addInput(Buffer.alloc(32, 7), 0);
     funding.addOutput(createWallet(config.seedHex, "testnet4").fundingScript, 50000n);
-    const api = async () => ({ hex: funding.toHex(), confirmations: 1 });
+    let spent = true;
+    const api = async (path: string) => path === "wallet" ? {
+      unspent_outputs: spent ? [] : [{ tx_hash: funding.getId(), tx_output_n: 0,
+        value: 50000, confirmations: 1 }],
+    } : { hex: funding.toHex(), confirmations: 1 };
     await assert.rejects(prepareNotification(store, config, api, funding.getId(), 0, 1000), /below 25/);
+    await assert.rejects(prepareNotification(store, config, api, funding.getId(), 0, 10000), /unspent/);
+    spent = false;
     const pending = await prepareNotification(store, config, api, funding.getId(), 0, 10000);
     assert.ok(pending.feeRate >= 25);
   } finally { store.close(); }
@@ -96,6 +150,9 @@ test("fee presets never go below 25 sat/vB and match higher estimates", () => {
   assert.equal(chosenRate(undefined, { "6": 40 }), 40);
   assert.equal(chosenRate({ preset: "custom", customRate: 60 }), 60);
   assert.throws(() => FeeChoice.parse({ preset: "custom", customRate: 5 }));
+  assert.throws(() => chosenRate({ preset: "custom" }));
+  assert.ok(feePresets({ "2": 1000000, "6": 1000000 }).every(preset =>
+    FeeChoice.safeParse({ preset: "custom", customRate: preset.rate }).success));
 });
 
 test("exact funding pays the notification with no change left over", () => {

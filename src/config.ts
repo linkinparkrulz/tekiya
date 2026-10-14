@@ -1,5 +1,6 @@
 import { networks, type Network } from "bitcoinjs-lib";
 import { z } from "zod";
+import type { Store } from "./store.js";
 
 export const NetworkName = z.enum(["mainnet", "testnet4"]);
 export type NetworkName = z.infer<typeof NetworkName>;
@@ -26,9 +27,12 @@ export const profiles: Record<NetworkName, NetworkProfile> = {
 
 export const ISSUANCE_LIMIT = 5;
 
-// Only an explicit opt-in enables anonymous, irreversible allocation.
-export function publicPaymentsEnabled(): boolean {
-  return process.env.NYM_PUBLIC_PAYMENTS === "true";
+export const PublicPayments = z.object({ enabled: z.boolean() });
+
+// A saved choice takes precedence over the legacy environment opt-in.
+export function publicPaymentsEnabled(store?: Pick<Store, "get">): boolean {
+  return store?.get("public-payments", PublicPayments)?.enabled ??
+    (process.env.NYM_PUBLIC_PAYMENTS === "true");
 }
 
 // Indices registered with the Dojo ahead of the next allocation.

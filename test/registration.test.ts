@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { Unavailable, type Config } from "../src/config.js";
 import { createWallet, deriveAddress } from "../src/bitcoin.js";
-import { syncDojo, type DojoApi } from "../src/registrar.js";
+import { pairingGeneration, syncDojo, type DojoApi } from "../src/registrar.js";
 import { Store } from "../src/store.js";
 
 const config: Config = {
@@ -247,6 +247,7 @@ test("incomplete transaction history and malformed later entries write nothing",
   try {
     const { api } = fakeDojo([{ index: 0, height: 10 }]);
     await assert.rejects(syncDojo(store, config, async (path, form) => {
+      if (path.startsWith("txs?")) return { n_tx: 0, page: 0, n_tx_page: 100, txs: [] };
       const response = await api(path, form) as { txs: unknown[] };
       return { ...response, txs: [] };
     }), /history is incomplete/);
@@ -254,6 +255,61 @@ test("incomplete transaction history and malformed later entries write nothing",
     await assert.rejects(syncDojo(store, config, fakeDojo([], [2]).api), /index-2/);
     assert.equal(store.registeredAddress(0), undefined);
   } finally { store.close(); }
+});
+
+test("clients bound before re-pairing are rejected before requesting history", async () => {
+  const store = new Store(":memory:");
+  try {
+    const api = Object.assign(async () => { throw new Error("must not request"); },
+      { pairingGeneration: pairingGeneration(store) });
+    store.replacePairing({ key: "new" });
+    await assert.rejects(syncDojo(store, config, api), /stale results rejected/);
+  } finally { store.close(); }
+});
+
+test("overlapping observations cannot overwrite a committed sync", async () => {
+  const store = new Store(":memory:");
+  try {
+    const old = fakeDojo([{ index: 1, height: 10 }]).api;
+    await assert.rejects(syncDojo(store, config, async (path, form) => {
+      await syncDojo(store, config, fakeDojo().api);
+      return old(path, form);
+    }), /overlapped/);
+    assert.equal(store.halted(), undefined);
+    assert.equal(store.registeredAddress(0), derive(0));
+  } finally { store.close(); }
+});
+
+test("capped wallet history uses GET txs pages and rejects repeated pages", async () => {
+  for (const duplicate of [false, true]) {
+    const store = new Store(":memory:");
+    try {
+      await syncDojo(store, config, fakeDojo().api);
+      store.allocate(id(0), 0, derive);
+      const txs = Array.from({ length: 101 }, (_, i) => ({
+        hash: i.toString(16).padStart(64, "0"), block_height: 10,
+        out: [{ addr: derive(0), value: 1 }],
+      }));
+      const api: DojoApi = async (path, form) => {
+        if (path === "wallet") return {
+          addresses: form!.active!.split("|").map(address => ({ address,
+            n_tx: address === derive(0) ? 101 : 0 })), txs: txs.slice(0, 1),
+        };
+        assert.equal(form, undefined);
+        const query = new URL(path, "http://test").searchParams;
+        assert.equal(query.get("count"), "100");
+        assert.equal(query.has("excludeNullXfer"), false);
+        const page = Number(query.get("page"));
+        const items = page === 0 ? txs.slice(0, 100) : [txs[duplicate ? 0 : 100]];
+        return { n_tx: 101, page, n_tx_page: 100, txs: items };
+      };
+      if (duplicate) await assert.rejects(syncDojo(store, config, api), /duplicate/);
+      else {
+        await syncDojo(store, config, api);
+        assert.equal(store.paymentStatus(id(0))?.confirmedSats, 101);
+      }
+    } finally { store.close(); }
+  }
 });
 
 test("spending-only history counts toward completeness but not received value", async () => {

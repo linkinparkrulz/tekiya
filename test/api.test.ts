@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Transaction } from "bitcoinjs-lib";
+import { z } from "zod";
 import { profiles, type Config } from "../src/config.js";
 import {
   buildNotification, createWallet, deriveAddress, identityStatement, messages,
@@ -26,6 +27,10 @@ function installation(approved = true): Store {
   funding.addOutput(createWallet(config.seedHex, network).fundingScript, 50000n);
   const pending = buildNotification(config, funding.toHex(), 0, 1000);
   store.insert("notification", pending);
+  store.insert("notification-health", {
+    txid: pending.txid, pairingGeneration: store.pairingGeneration(),
+    confirmations: 1, checkedAt: new Date().toISOString(),
+  });
   if (approved) {
     const signature = Buffer.from(messages.sign(
       identityStatement(config, pending), merchant.getNotificationPrivateKey(),
@@ -144,6 +149,46 @@ test("the store is told why issuance is paused", async () => {
     const status = (await call(base, "/v1/status", { headers: auth })).body;
     assert.equal(status.issuing, false);
     assert.match(String(status.reason), /lookahead/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("notification health blocks new allocations but preserves existing retries", async () => {
+  const store = installation();
+  const { server, base } = await serve(store);
+  try {
+    const id = "order_existing_health";
+    const created = await create(base, id, 1000);
+    assert.equal(created.status, 200);
+    const pending = store.get("notification", z.object({ txid: z.string() }))!;
+    const healthy = {
+      txid: pending.txid, pairingGeneration: store.pairingGeneration(),
+      confirmations: 1, checkedAt: new Date().toISOString(),
+    };
+    for (const [name, unhealthy, reason] of [
+      ["unconfirmed", { ...healthy, confirmations: 0 }, /no longer confirmed/],
+      ["stale", { ...healthy, checkedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString() }, /stale/],
+      ["missing", undefined, /verification pending/],
+      ["pairing", { ...healthy, pairingGeneration: "different-pairing" }, /verification pending/],
+      ["txid", { ...healthy, txid: "ff".repeat(32) }, /verification pending/],
+    ] as const) {
+      store.remove("notification-health");
+      if (unhealthy) store.insert("notification-health", unhealthy);
+      const refused = await create(base, `order_health_${name}`, 1000);
+      assert.equal(refused.status, 503, name);
+      assert.equal(refused.body.code, "unavailable", name);
+      assert.match(String(refused.body.error), reason, name);
+      assert.equal(store.findAllocation(`order_health_${name}`), undefined, name);
+      const status = (await call(base, "/v1/status", { headers: auth })).body;
+      assert.equal(status.issuing, false, name);
+      assert.match(String(status.reason), reason, name);
+      assert.deepEqual(await create(base, id, 1000), created, name);
+      assert.equal(store.nextIndex(), 1, name);
+    }
+    store.replace("notification-health", healthy);
+    assert.equal((await create(base, "order_health_recovered", 1000)).status, 200);
   } finally {
     server.close();
     store.close();

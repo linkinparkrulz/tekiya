@@ -48,10 +48,10 @@ function header(site: Site, intro = false): string {
     : ""}`;
 }
 
-function message(site: Site, title: string, text: string): string {
+function message(site: Site, title: string, text: string, back = "/"): string {
   return page(siteTitle(site, title), `${header(site)}
 <div class="card"><h2>${escape(title)}</h2><p>${escape(text)}</p>
-<a class="button" href="/">Back</a></div>`);
+<a class="button" href="${escape(back)}">Back</a></div>`);
 }
 
 function form(site: Site, monero: boolean): string {
@@ -217,8 +217,10 @@ export function parseBtcAmount(value: string): number {
   if (text === "") return 0;
   const match = /^(\d{1,8})(?:\.(\d{1,8}))?$/.exec(text);
   if (!match) throw new Error("Enter the amount as BTC, like 0.0001");
-  return Number(match[1]) * 100000000 +
+  const sats = Number(match[1]) * 100000000 +
     Number((match[2] ?? "").padEnd(8, "0"));
+  requireCondition(sats <= 100000000, "At most 1 BTC");
+  return sats;
 }
 
 // Returns false when the request is not for a public page.
@@ -235,7 +237,7 @@ export async function handlePublic(
   };
 
   if (req.method === "GET" && path === "/") {
-    if (!publicPaymentsEnabled()) {
+    if (!publicPaymentsEnabled(store)) {
       sendHtml(res, 503, message(site, "Public payments disabled",
         "This service is not accepting anonymous payment requests."));
       return true;
@@ -263,26 +265,23 @@ export async function handlePublic(
 
   if (req.method === "POST" && path === "/pay") {
     try {
-      if (!publicPaymentsEnabled()) throw new Unavailable("Public payments disabled");
-      if (!config) throw new Unavailable("Not set up");
-      requireApproval(store, config);
       const body = await readForm(req);
       const nonce = body.get("nonce") ?? "";
       if (!NONCE.test(nonce)) throw new Error("Form expired; reload the page");
-      if (moneroSettings(store)) {
-        // The payer picks a coin next; nothing is allocated yet.
+      const id = webId(nonce);
+      // First submission wins, including allocations predating web_requests.
+      if (!store.findWebRequest(id) && !store.findAllocation(id) && !store.findXmr(id)) {
+        if (!publicPaymentsEnabled(store)) throw new Unavailable("Public payments disabled");
+        if (!config) throw new Unavailable("Not set up");
+        requireApproval(store, config);
         const currency = body.get("currency") === "XMR" ? "XMR" : "BTC";
         const amount = body.get("amount") ?? "";
-        store.createWebRequest(
-          webId(nonce), currency,
-          currency === "XMR" ? parseXmrAmount(amount) : parseBtcAmount(amount),
-        );
-      } else {
-        store.allocate(
-          webId(nonce),
-          parseBtcAmount(body.get("amount") ?? ""),
-          index => deriveAddress(config, index),
-        );
+        const atomic = currency === "XMR" ? parseXmrAmount(amount) : parseBtcAmount(amount);
+        const derive = (index: number) => deriveAddress(config, index);
+        const blocker = currency === "XMR" ? xmrBlocker(store) : store.issuanceBlocker(derive);
+        if (blocker) throw new Unavailable(blocker);
+        store.createWebRequest(id, currency, atomic);
+        if (!moneroSettings(store)) store.allocate(id, atomic, derive);
       }
       res.setHeader("Location", `/pay/${nonce}`);
       res.writeHead(303);
@@ -290,7 +289,7 @@ export async function handlePublic(
     } catch (error) {
       if (error instanceof Unavailable) {
         sendHtml(res, 503, message(site, "Temporarily unavailable",
-          "No payment address can be issued right now. Please try later."));
+          error.message));
       } else {
         sendHtml(res, 400, message(site, "Request not accepted",
           error instanceof Error ? error.message : "Request failed"));
@@ -305,17 +304,17 @@ export async function handlePublic(
     const id = webId(nonce);
     try {
       const request = store.findWebRequest(id);
-      if (!config || !request) throw new Error("This payment link is not valid");
       const coin = (await readForm(req)).get("coin") === "xmr" ? "xmr" : "btc";
       const exists = coin === "xmr" ? store.findXmr(id) : store.findAllocation(id);
-      if (!exists && !publicPaymentsEnabled()) {
+      if (!config || (!request && !exists)) throw new Error("This payment link is not valid");
+      if (!exists && !publicPaymentsEnabled(store)) {
         throw new Unavailable("Public payments disabled");
       }
       // An amount entered in the other coin is dropped.
-      if (coin === "xmr") {
+      if (!exists && request && coin === "xmr") {
         await allocateMonero(store, id,
           request.currency === "XMR" ? request.amount_atomic : 0);
-      } else {
+      } else if (!exists && request) {
         requireApproval(store, config);
         store.allocate(id, request.currency === "BTC" ? request.amount_atomic : 0,
           index => deriveAddress(config, index));
@@ -326,7 +325,11 @@ export async function handlePublic(
     } catch (error) {
       sendHtml(res, error instanceof Unavailable ? 503 : 400, message(site,
         error instanceof Unavailable ? "Temporarily unavailable" : "Request not accepted",
-        error instanceof Error ? error.message : "Request failed"));
+        (error instanceof Error ? error.message : "Request failed") +
+        " Keep this payment link and retry the same coin here, not a new form. " +
+        "A wallet RPC failure may have created a subaddress even without a response; " +
+        "the operator may need to reconcile it before issuance can resume.",
+        `/pay/${nonce}`));
     }
     return true;
   }
@@ -335,7 +338,7 @@ export async function handlePublic(
   if (req.method === "GET" && view?.[1]) {
     const nonce = view[1];
     const id = webId(nonce);
-    if (config && store.findWebRequest(id)) {
+    if (config && (store.findWebRequest(id) || store.findXmr(id))) {
       const asked = new URL(req.url ?? "", "http://x").searchParams.get("coin");
       const selected: Coin | undefined = asked === "btc" || asked === "xmr"
         ? asked

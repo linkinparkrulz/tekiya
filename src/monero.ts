@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readlinkSync } from "node:fs";
+import { hostname } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { Unavailable, requireCondition, type NetworkName } from "./config.js";
 import { Store, type XmrAllocation } from "./store.js";
@@ -37,24 +39,94 @@ export type MoneroSettings = z.infer<typeof MoneroSettings>;
 
 export const MONERO = "monero";
 
-// Durable exclusion, never a SQLite transaction spanning RPC awaits. After a
-// crash/error, stop issuers, reconcile the wallet with xmr_allocations (store
-// the wallet and check get_address), then remove this settings key manually.
-// Never clear a reservation while its owner may still be running.
 export const MONERO_RESERVATION = "monero-reservation";
-const Reservation = z.object({ requestId: z.string(), amountAtomic: z.number() });
+export const MONERO_PENDING_SETUP = "monero-pending-setup";
+const GENERATION = "monero-generation";
+const HIGH_WATER = "monero-high-water";
+const Owner = z.object({ host: z.string(), boot: z.string(), pid: z.number(), start: z.string() });
+const Reservation = z.object({
+  requestId: z.string(), amountAtomic: z.number(),
+  token: z.string().optional(), owner: Owner.optional(),
+  phase: z.enum(["read", "mutation"]).optional(), active: z.boolean().optional(),
+  high: z.number().int().nonnegative().optional(),
+});
 
-function reserveWallet(store: Store, requestId: string, amountAtomic: number): void {
-  const held = store.get(MONERO_RESERVATION, Reservation);
-  if (held?.requestId === requestId) {
-    requireCondition(held.amountAtomic === amountAtomic,
-      "Idempotency key already used with a different amount");
-  }
+function processStart(pid: number): string {
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]!;
+}
+
+function localOwner(): z.infer<typeof Owner> {
+  // Minimal container images need not have a machine-id. Boot ID and PID
+  // namespace still prevent comparing PIDs belonging to different containers.
+  let machine = "";
+  try { machine = readFileSync("/etc/machine-id", "utf8").trim(); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  return { host: `${hostname()}:${machine}:${readlinkSync("/proc/self/ns/pid")}`,
+    boot: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
+    pid: process.pid, start: processStart(process.pid) };
+}
+
+function definitelyDead(owner: z.infer<typeof Owner> | undefined): boolean {
+  if (!owner) return false;
+  const local = localOwner();
+  if (owner.host !== local.host) return false;
+  if (owner.boot !== local.boot) return true;
+  try { return processStart(owner.pid) !== owner.start; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
+}
+
+function transaction<T>(store: Store, action: () => T): T {
+  store.db.exec("BEGIN IMMEDIATE");
   try {
-    store.insert(MONERO_RESERVATION, { requestId, amountAtomic });
-  } catch {
-    throw new Unavailable("Monero wallet is reserved; retry or reconcile a failed operation");
+    const result = action();
+    store.db.exec("COMMIT");
+    return result;
+  } catch (error) { store.db.exec("ROLLBACK"); throw error; }
+}
+
+async function reserveWallet<T>(store: Store, requestId: string, amountAtomic: number,
+  validate: () => T): Promise<{ token: string; value: T }> {
+  const deadline = performance.now() + 130_000;
+  const token = randomBytes(16).toString("hex");
+  const owner = localOwner();
+  for (;;) {
+    const acquired = transaction(store, () => {
+      const held = store.get(MONERO_RESERVATION, Reservation);
+      if (held?.requestId === requestId) requireCondition(held.amountAtomic === amountAtomic,
+        "Idempotency key already used with a different amount");
+      if (held) {
+        if (!held.owner || (held.phase !== "read" && (held.active === false || definitelyDead(held.owner)))) {
+          throw new Unavailable("Monero wallet is reserved; explicit reconciliation required");
+        }
+        if (held.phase !== "read" || !definitelyDead(held.owner)) return undefined;
+      }
+      const value = validate();
+      store.replace(MONERO_RESERVATION, { requestId, amountAtomic, token, owner,
+        phase: "read", active: true });
+      return { token, value };
+    });
+    if (acquired) return acquired;
+    if (performance.now() >= deadline) throw new Unavailable("Monero wallet is reserved; timed out waiting");
+    await delay(25);
   }
+}
+
+function finishWallet(store: Store, token: string, success = false): void {
+  transaction(store, () => {
+    const held = store.get(MONERO_RESERVATION, Reservation);
+    requireCondition(held?.token === token, "Monero operation ownership changed");
+    if (success || held.phase === "read") store.remove(MONERO_RESERVATION);
+    else store.replace(MONERO_RESERVATION, { ...held, active: false });
+  });
+}
+
+function mutateWallet(store: Store, token: string, high?: number): void {
+  transaction(store, () => {
+    const held = store.get(MONERO_RESERVATION, Reservation);
+    requireCondition(held?.token === token, "Monero operation ownership changed");
+    store.replace(MONERO_RESERVATION, { ...held, phase: "mutation", high });
+  });
 }
 
 // Primary addresses: 4… on mainnet, 5… on stagenet; 95 base58 characters.
@@ -145,7 +217,7 @@ export function moneroUri(address: string, atomic: number): string {
 
 // --- JSON-RPC client ------------------------------------------------------
 
-export class MoneroRpcError extends Error {
+export class MoneroRpcError extends Unavailable {
   constructor(readonly code: number, message: string) {
     super(message);
   }
@@ -193,10 +265,10 @@ export const callWallet: MoneroRpc = (method, params = {}) => {
     child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
     child.stderr.resume();
     child.stdin.on("error", () => {});
-    child.on("error", () => reject(new Error("Unable to execute curl")));
+    child.on("error", () => reject(new Unavailable("Unable to execute curl")));
     child.on("close", code => {
       if (code !== 0) {
-        reject(new Error("The Monero wallet service is not reachable"));
+        reject(new Unavailable("The Monero wallet service is not reachable"));
         return;
       }
       try {
@@ -210,7 +282,7 @@ export const callWallet: MoneroRpc = (method, params = {}) => {
           resolve(body.result);
         }
       } catch {
-        reject(new Error("The Monero wallet returned invalid JSON"));
+        reject(new Unavailable("The Monero wallet returned invalid JSON"));
       }
     });
     child.stdin.end(lines.join("\n") + "\n");
@@ -265,7 +337,14 @@ export async function enableMonero(
   const address = validatePrimaryAddress(input.address, xmrNetwork);
   const viewKey = validateViewKey(input.viewKey);
   validateNode(input.node, xmrNetwork);
-  const previous = configuredMoneroSettings(store);
+  requireCondition(input.restoreHeight === undefined ||
+    (Number.isSafeInteger(input.restoreHeight) && input.restoreHeight >= 0),
+  "Restore height must be a nonnegative safe integer");
+  const { token, value: { previous, generation } } = await reserveWallet(store, "enable", 0, () => ({
+    previous: configuredMoneroSettings(store), generation: store.get(GENERATION, z.string()),
+  }));
+  let success = false;
+  try {
   const account = input.account ?? previous?.account ?? 1;
   requireCondition(
     Number.isInteger(account) && account >= 1 && account <= 49,
@@ -275,7 +354,7 @@ export async function enableMonero(
   requireCondition(!previous || previous.account === account,
     "Monero account cannot change after setup");
   requireCondition(
-    !previous || previous.address === address,
+    !previous || (previous.address === address && previous.network === xmrNetwork),
     "Monero was set up with another address. Disable it and start a " +
     "fresh installation to change wallets; issued subaddresses belong to it.",
   );
@@ -292,9 +371,9 @@ export async function enableMonero(
     enabledAt: previous?.enabledAt ?? new Date().toISOString(),
   };
 
-  reserveWallet(store, "enable", 0);
   // Preserve recovery credentials before any RPC can create a wallet file.
-  store.replace(MONERO, { ...settings, enabled: false });
+  store.replace(MONERO_PENDING_SETUP, { ...settings, enabled: false });
+  mutateWallet(store, token);
   // The wallet must be open before anything else, the node included:
   // monero-wallet-rpc answers "No wallet file" otherwise.
   try {
@@ -308,17 +387,21 @@ export async function enableMonero(
     });
   } catch (error) {
     // The wallet already exists from an earlier enable.
-    if (!(error instanceof MoneroRpcError) || !/exist/i.test(error.message)) {
-      if (error instanceof MoneroRpcError) store.remove(MONERO_RESERVATION);
-      throw error instanceof MoneroRpcError
-        ? new Error(`The Monero wallet refused the keys: ${error.message}`)
-        : error;
+    if (!(error instanceof MoneroRpcError) || error.code !== -1 ||
+      error.message !== "Wallet already exists.") {
+      // Only this known prevalidation failure is guaranteed not to create a file.
+      if (error instanceof MoneroRpcError && error.code === -1 &&
+        error.message === "Failed to verify view key secret key") {
+        store.remove(MONERO_PENDING_SETUP);
+        success = true;
+        throw new Error(`The Monero wallet refused the keys: ${error.message}`);
+      }
+      throw error;
     }
     await rpc("open_wallet", {
       filename: settings.walletFile, password: settings.walletPassword,
     });
   }
-  await setDaemon(rpc, settings.node, settings.network);
 
   const Address = z.object({ address: z.string() });
   requireCondition(
@@ -327,15 +410,24 @@ export async function enableMonero(
     "The Monero wallet opened a different address",
   );
   await ensureAccount(rpc, account);
+  await verifyWallet(store, rpc, settings);
   await rpc("store");
-  store.replace(MONERO, settings);
-  store.remove(MONERO_RESERVATION);
+  transaction(store, () => {
+    if (store.get(GENERATION, z.string()) !== generation) settings.enabled = false;
+    store.replace(MONERO, settings);
+    store.remove(MONERO_PENDING_SETUP);
+  });
+  success = true;
   return settings;
+  } finally { finishWallet(store, token, success); }
 }
 
 export function disableMonero(store: Store): void {
-  const settings = store.get(MONERO, MoneroSettings);
-  if (settings) store.replace(MONERO, { ...settings, enabled: false });
+  transaction(store, () => {
+    store.replace(GENERATION, randomBytes(16).toString("hex"));
+    const settings = store.get(MONERO, MoneroSettings);
+    if (settings) store.replace(MONERO, { ...settings, enabled: false });
+  });
 }
 
 export function moneroSettings(store: Store): MoneroSettings | undefined {
@@ -353,17 +445,76 @@ async function ensureOpen(rpc: MoneroRpc, settings: MoneroSettings) {
   try {
     await rpc("get_height");
   } catch (error) {
-    if (!(error instanceof MoneroRpcError)) throw error;
+    if (!(error instanceof MoneroRpcError) || error.code !== -13) throw error;
     await rpc("open_wallet", {
       filename: settings.walletFile, password: settings.walletPassword,
     });
-    await setDaemon(rpc, settings.node, settings.network);
   }
+}
+
+async function verifyWallet(store: Store, rpc: MoneroRpc, settings: MoneroSettings): Promise<number> {
+  await ensureOpen(rpc, settings);
+  requireCondition(z.object({ address: z.string() }).parse(
+    await rpc("get_address", { account_index: 0 })).address === settings.address,
+  "The Monero wallet opened a different address");
+  const addresses = z.object({ addresses: z.array(z.object({
+    address_index: z.number().int().nonnegative(), address: z.string(),
+  })).min(1) }).parse(await rpc("get_address", { account_index: settings.account })).addresses;
+  const mapping = new Map(addresses.map(a => [a.address_index, a.address]));
+  requireCondition(mapping.size === addresses.length, "Duplicate wallet address indices");
+  for (const allocation of store.db.prepare("SELECT subaddr_index, address FROM xmr_allocations").all()) {
+    requireCondition(mapping.get(Number(allocation.subaddr_index)) === allocation.address,
+      "Monero wallet allocation mapping does not match; reconciliation required");
+  }
+  const high = Math.max(...mapping.keys());
+  requireCondition(high >= (store.get(HIGH_WATER, z.number()) ?? 0),
+    "Monero wallet lost reserved indices; reconciliation required");
+  await setDaemon(rpc, settings.node, settings.network);
+  return high;
+}
+
+/** Operator-only recovery. Stop every other Tekiya/wallet client first. Foreign
+ * PID namespaces require that operator attestation; known-live local owners
+ * are still rejected. Never recreates missing addresses. Unknown issued
+ * indices are burned, not assigned to the failed request. Setup stays disabled.
+ */
+export async function recoverMonero(store: Store,
+  options: { otherProcessesStopped: true }, rpc: MoneroRpc = callWallet): Promise<MoneroSettings> {
+  requireCondition(options.otherProcessesStopped === true, "Stop other processes before reconciliation");
+  const token = randomBytes(16).toString("hex");
+  const { held, settings } = transaction(store, () => {
+    const held = store.get(MONERO_RESERVATION, Reservation);
+    requireCondition(held, "No Monero reservation to reconcile");
+    requireCondition(held.owner && (held.active === false ||
+      held.owner.host !== localOwner().host || definitelyDead(held.owner)),
+      "Monero reservation owner may still be running; cannot reconcile");
+    const settings = store.get(MONERO_PENDING_SETUP, MoneroSettings) ?? configuredMoneroSettings(store);
+    requireCondition(settings, "Missing Monero recovery credentials");
+    store.replace(MONERO_RESERVATION, { ...held, token, owner: localOwner(), active: true, phase: "mutation" });
+    return { held, settings };
+  });
+  let success = false;
+  try {
+    const high = await verifyWallet(store, rpc, settings);
+    requireCondition(held.high === undefined || high > held.high,
+      "Uncertain allocation is not present in wallet; restore/reconcile wallet manually, do not clear reservation");
+    await rpc("store");
+    transaction(store, () => {
+      store.replace(HIGH_WATER, high);
+      if (store.get(MONERO_PENDING_SETUP, MoneroSettings)) {
+        store.replace(MONERO, { ...settings, enabled: false });
+        store.remove(MONERO_PENDING_SETUP);
+      }
+    });
+    success = true;
+    return configuredMoneroSettings(store)!;
+  } finally { finishWallet(store, token, success); }
 }
 
 export function xmrBlocker(store: Store): string | undefined {
   if (!moneroSettings(store)) return "Monero is not enabled";
-  if (store.get(MONERO_RESERVATION, Reservation)) return "Monero wallet is reserved";
+  const held = store.get(MONERO_RESERVATION, Reservation);
+  if (held && held.phase !== "read" && held.active !== true) return "Monero wallet is reserved";
   if (xmrIndexGap(store) >= XMR_GAP_LIMIT) {
     return `Monero paused: ${XMR_GAP_LIMIT} subaddresses in a row are unpaid`;
   }
@@ -376,7 +527,7 @@ function xmrIndexGap(store: Store, walletHigh = 0): number {
       COALESCE((SELECT MAX(subaddr_index) FROM xmr_received
         WHERE confirmed_atomic > 0 OR pending_atomic > 0), 0) AS seen
   `).get()!;
-  return Math.max(Number(row.high), walletHigh) - Number(row.seen);
+  return Math.max(Number(row.high), walletHigh, store.get(HIGH_WATER, z.number()) ?? 0) - Number(row.seen);
 }
 
 /**
@@ -398,48 +549,52 @@ export async function allocateMonero(
       amountAtomic <= 1000 * PICONERO_PER_XMR,
     "amountAtomic must be an integer from 0 through 1000 XMR",
   );
-  const existing = store.findXmr(requestId);
-  if (existing) {
-    requireCondition(
-      existing.amount_atomic === amountAtomic,
-      "Idempotency key already used with a different amount",
-    );
-    return existing;
-  }
-  const blocker = xmrBlocker(store);
-  // Check the reservation amount even when another caller owns the lock.
-  const held = store.get(MONERO_RESERVATION, Reservation);
-  if (held?.requestId === requestId) {
-    requireCondition(held.amountAtomic === amountAtomic,
+  const committed = store.findXmr(requestId);
+  if (committed) {
+    requireCondition(committed.amount_atomic === amountAtomic,
       "Idempotency key already used with a different amount");
+    return committed;
   }
-  if (blocker) throw new Unavailable(blocker);
-  const settings = moneroSettings(store);
-  requireCondition(settings, "Monero is not enabled");
-  reserveWallet(store, requestId, amountAtomic);
-  await ensureOpen(rpc, settings);
-  const addresses = z.object({ addresses: z.array(z.object({
-    address_index: z.number().int().nonnegative(),
-  })).min(1) }).parse(await rpc("get_address", { account_index: settings.account }));
-  const high = Math.max(...addresses.addresses.map(a => a.address_index));
-  if (xmrIndexGap(store, high) >= XMR_GAP_LIMIT) {
-    store.remove(MONERO_RESERVATION);
-    throw new Unavailable(`Monero paused: ${XMR_GAP_LIMIT} subaddress index gap`);
-  }
-  const created = await createSubaddress(settings, requestId, rpc);
-  if (xmrIndexGap(store, created.index) > XMR_GAP_LIMIT) {
-    throw new Unavailable("Monero wallet skipped beyond the subaddress gap; reconcile reservation");
-  }
-  const allocation: XmrAllocation = {
-    request_id: requestId,
-    subaddr_index: created.index,
-    address: created.address,
-    amount_atomic: amountAtomic,
-    created_at: new Date().toISOString(),
-  };
-  store.insertXmr(allocation);
-  store.remove(MONERO_RESERVATION);
-  return allocation;
+  const { token, value: { existing, settings, generation } } = await reserveWallet(store, requestId, amountAtomic, () => {
+    const existing = store.findXmr(requestId);
+    if (existing) {
+      requireCondition(existing.amount_atomic === amountAtomic,
+        "Idempotency key already used with a different amount");
+      return { existing };
+    }
+    const settings = moneroSettings(store);
+    requireCondition(settings, "Monero is not enabled");
+    if (xmrIndexGap(store) >= XMR_GAP_LIMIT) throw new Unavailable("Monero paused: subaddress index gap");
+    return { existing, settings, generation: store.get(GENERATION, z.string()) };
+  });
+  let success = false;
+  try {
+    if (existing) return existing;
+    const high = await verifyWallet(store, rpc, settings!);
+    if (xmrIndexGap(store, high) >= XMR_GAP_LIMIT) {
+      throw new Unavailable(`Monero paused: ${XMR_GAP_LIMIT} subaddress index gap`);
+    }
+    requireCondition(moneroSettings(store) && store.get(GENERATION, z.string()) === generation,
+      "Monero was disabled during allocation");
+    mutateWallet(store, token, high);
+    const created = await createSubaddress(settings!, requestId, rpc);
+    requireCondition(created.index > high, "Monero wallet recycled a subaddress index");
+    if (xmrIndexGap(store, created.index) > XMR_GAP_LIMIT) {
+      throw new Unavailable("Monero wallet skipped beyond the subaddress gap; reconcile reservation");
+    }
+    const allocation: XmrAllocation = {
+      request_id: requestId,
+      subaddr_index: created.index,
+      address: created.address,
+      amount_atomic: amountAtomic,
+      created_at: new Date().toISOString(),
+    };
+    store.insertXmr(allocation);
+    success = true;
+    requireCondition(moneroSettings(store) && store.get(GENERATION, z.string()) === generation,
+      "Monero was disabled during allocation");
+    return allocation;
+  } finally { finishWallet(store, token, success); }
 }
 
 /** Refreshes received totals for every issued subaddress. */
@@ -447,10 +602,11 @@ export async function syncMonero(
   store: Store,
   rpc: MoneroRpc = callWallet,
 ): Promise<MoneroRefresh | undefined> {
-  const settings = configuredMoneroSettings(store);
-  if (!settings) return undefined;
-  reserveWallet(store, "refresh", 0);
+  const { token, value: settings } = await reserveWallet(store, "refresh", 0,
+    () => configuredMoneroSettings(store));
   try {
+    if (!settings) return undefined;
+    await verifyWallet(store, rpc, settings);
     const result = await refreshMonero(settings, store.xmrIndices(), rpc);
     for (const [index, value] of result.received) {
       store.recordXmrReceived(index, value.confirmed, value.pending);
@@ -458,7 +614,7 @@ export async function syncMonero(
     return result;
   } finally {
     // Refresh creates no accounts or addresses, so a failed read is retryable.
-    store.remove(MONERO_RESERVATION);
+    finishWallet(store, token);
   }
 }
 

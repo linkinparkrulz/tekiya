@@ -17,6 +17,7 @@ import {
 import { registerPaynym } from "./paynym.js";
 import { DIRECTORY, torJson } from "./tor.js";
 import { serve } from "./server.js";
+import { recoverMonero } from "./monero.js";
 
 process.umask(0o077);
 
@@ -85,6 +86,13 @@ async function main(): Promise<void> {
     };
 
     switch (command) {
+      case "monero-reconcile": {
+        requireCondition(args.length === 1 && args[0] === "--recovery-reviewed",
+          "Stop all other Tekiya and wallet clients first. Usage: monero-reconcile --recovery-reviewed");
+        await recoverMonero(store, { otherProcessesStopped: true });
+        print("Monero wallet reconciled. No address was recycled; recovered setup remains disabled.");
+        break;
+      }
       case "info": {
         const wallet = createWallet(config.seedHex, network);
         print({
@@ -248,7 +256,7 @@ async function main(): Promise<void> {
         throw new Error(
           "Commands: serve (setup runs in its dashboard), init, info, token, " +
           "directory, pair, paynym, sync, status, profile, resume-issuance, " +
-          "prepare, broadcast, test-address, statement, approve",
+          "prepare, broadcast, test-address, statement, approve, monero-reconcile",
         );
     }
   } finally {

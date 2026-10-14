@@ -4,5 +4,6 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends socat \
     && rm -rf /var/lib/apt/lists/*
-USER nobody
-CMD ["socat", "TCP-LISTEN:8089,fork,reuseaddr", "TCP:app:8089"]
+# Match the app image's node user to access its owner-only admin socket.
+USER 1000:1000
+CMD ["socat", "TCP-LISTEN:8089,fork,reuseaddr", "UNIX-CONNECT:/run/tekiya-admin/admin.sock"]

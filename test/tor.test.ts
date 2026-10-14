@@ -4,6 +4,9 @@ import { createServer, type Server } from "node:http";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import { TorRequestError, torJson } from "../src/tor.js";
+import { connectPaired } from "../src/setup.js";
+import { Store } from "../src/store.js";
+import type { Config } from "../src/config.js";
 
 // Stand-in for Tor: a SOCKS5 proxy that forwards every host to a local
 // HTTP server, or refuses hosts starting with "dead".
@@ -11,6 +14,7 @@ let http: Server;
 let socks: net.Server;
 let socksPort = 0;
 const onion = (label: string) => `http://${label.padEnd(56, "a")}.onion`;
+let onLogin = () => {};
 
 before(async () => {
   http = createServer((req, res) => {
@@ -19,6 +23,10 @@ before(async () => {
       res.end(body);
     };
     if (req.url === "/ok") return reply(200, '{"fine":true}');
+    if (req.url === "/auth/login") {
+      onLogin();
+      return reply(200, '{"authorizations":{"access_token":"token"}}');
+    }
     if (req.url === "/denied") return reply(401, '{"status":"error","error":"Invalid API key"}');
     if (req.url === "/missing") return reply(404, "{}");
     if (req.url === "/broken") return reply(500, "{}");
@@ -70,6 +78,19 @@ async function failure(url: string, options = {}): Promise<TorRequestError> {
 
 test("successful requests return the JSON body", async () => {
   assert.deepEqual(await torJson(`${onion("good")}/ok`), { fine: true });
+});
+
+test("paired clients capture generation before login completes", async () => {
+  const store = new Store(":memory:");
+  const pairing = { network: "testnet4", baseUrl: onion("good"), apikey: "key" };
+  try {
+    store.replacePairing(pairing);
+    onLogin = () => store.replacePairing(pairing);
+    await assert.rejects(connectPaired(store, { network: "testnet4" } as Config), /stale/);
+    onLogin = () => {};
+    const api = await connectPaired(store, { network: "testnet4" } as Config);
+    assert.equal(typeof api.pairingGeneration, "string");
+  } finally { onLogin = () => {}; store.close(); }
 });
 
 test("Dojo HTTP errors say what to fix", async () => {

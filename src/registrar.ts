@@ -5,10 +5,20 @@ import {
 import { deriveAddress } from "./bitcoin.js";
 import { Store } from "./store.js";
 
-export type DojoApi = (
+export type DojoApi = ((
   path: string,
   form?: Record<string, string>,
-) => Promise<unknown>;
+) => Promise<unknown>) & { readonly pairingGeneration?: string | null };
+
+export function pairingGeneration(store: Store): string {
+  return store.pairingGeneration();
+}
+
+export function assertPairedClient(store: Store, api: DojoApi): void {
+  requireCondition(api.pairingGeneration === undefined ||
+    api.pairingGeneration === pairingGeneration(store),
+  "Dojo pairing changed; stale results rejected");
+}
 
 const WalletResponse = z.object({
   addresses: z.array(z.object({
@@ -51,10 +61,9 @@ export async function syncDojo(
   api: DojoApi,
   options: { through?: number } = {},
 ): Promise<SyncResult> {
-  const snapshot = () => store.db.prepare(
-    "SELECT key, value FROM settings WHERE key IN ('pairing', 'pairing-generation') ORDER BY key",
-  ).all();
-  const pairing = JSON.stringify(snapshot());
+  assertPairedClient(store, api);
+  const pairing = pairingGeneration(store);
+  const revision = store.get("dojo-sync-revision", z.number().int().nonnegative()) ?? 0;
   const next = store.nextIndex();
   const last = Math.min(
     ISSUANCE_LIMIT - 1,
@@ -76,6 +85,38 @@ export async function syncDojo(
     new Set(response.txs.map(tx => tx.hash)).size === response.txs.length,
     "Dojo returned duplicate transactions",
   );
+  const countFor = (address: string) => response.txs.filter(tx =>
+    tx.out.some(output => output.addr === address) ||
+    tx.inputs.some(input => input.prev_out.addr === address)).length;
+  if (response.addresses.some(entry => countFor(entry.address) < entry.n_tx)) {
+    // Dojo GET /txs: page is zero-based; omit excludeNullXfer entirely.
+    // See upstream doc/GET_txs.md and accounts/transactions-rest-api.js.
+    const Page = z.object({
+      n_tx: z.number().int().nonnegative().max(10000),
+      page: z.number().int().nonnegative(),
+      n_tx_page: z.literal(100),
+      txs: WalletResponse.shape.txs.max(100),
+    });
+    const txs: typeof response.txs = [];
+    const hashes = new Set<string>();
+    let total: number | undefined;
+    for (let page = 0; page < 100; page++) {
+      const query = new URLSearchParams({ active: addresses.join("|"), page: String(page), count: "100" });
+      const result = Page.parse(await api(`txs?${query}`));
+      total ??= result.n_tx;
+      requireCondition(result.page === page && result.n_tx === total &&
+        result.txs.length === Math.min(100, total - txs.length),
+      "Dojo transaction history is incomplete or changed during pagination");
+      for (const tx of result.txs) {
+        requireCondition(!hashes.has(tx.hash), "Dojo returned duplicate transactions across pages");
+        hashes.add(tx.hash);
+        txs.push(tx);
+      }
+      if (txs.length === total) break;
+    }
+    requireCondition(txs.length === total, "Dojo transaction history is incomplete");
+    response.txs = txs;
+  }
   for (const [index, address] of addresses.entries()) {
     const entries = response.addresses.filter(item => item.address === address);
     requireCondition(entries.length === 1,
@@ -91,8 +132,11 @@ export async function syncDojo(
 
   store.db.exec("BEGIN IMMEDIATE");
   try {
-    requireCondition(JSON.stringify(snapshot()) === pairing,
+    requireCondition(pairingGeneration(store) === pairing,
       "Dojo pairing changed during sync; stale results rejected");
+    requireCondition((store.get("dojo-sync-revision", z.number().int().nonnegative()) ?? 0) === revision,
+      "Dojo sync overlapped a newer observation; stale results rejected");
+    store.replace("dojo-sync-revision", revision + 1);
     // Re-read under the write lock: another process may have issued addresses.
     const issued = store.nextIndex();
 

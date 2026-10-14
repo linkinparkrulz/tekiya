@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { z } from "zod";
+import type { DojoApi } from "./registrar.js";
 import {
   onionUrl, requireCondition,
   type NetworkName, type Pairing,
@@ -217,7 +218,8 @@ const Login = z.object({
 export async function connectDojo(
   pairing: Pairing,
   network: NetworkName,
-) {
+  pairingGeneration: string | null = null,
+): Promise<DojoApi> {
   requireCondition(
     pairing.network === network,
     "Dojo pairing network label does not match this installation",
@@ -230,7 +232,7 @@ export async function connectDojo(
     { form: { apikey: pairing.apikey } },
   ));
 
-  return async (
+  const api: DojoApi = async (
     path: string,
     form?: Record<string, string>,
   ): Promise<unknown> => {
@@ -246,4 +248,6 @@ export async function connectDojo(
     }
     return result;
   };
+  Object.defineProperty(api, "pairingGeneration", { value: pairingGeneration });
+  return api;
 }

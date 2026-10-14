@@ -2,12 +2,179 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { CSP, escape, page, qrSvg } from "../src/html.js";
 import { handlePublic, parseBtcAmount } from "../src/web.js";
-import { Profile, publicPaymentsEnabled } from "../src/config.js";
+import { Profile, PublicPayments, profiles, publicPaymentsEnabled } from "../src/config.js";
+import { Transaction } from "bitcoinjs-lib";
+import { MONERO } from "../src/monero.js";
+import { dashboard } from "../src/admin-pages.js";
+import { TEST_REQUEST_ID } from "../src/setup.js";
 import { Store } from "../src/store.js";
-import { createWallet, deriveAddress } from "../src/bitcoin.js";
+import { buildNotification, createWallet, deriveAddress, identityStatement, messages } from "../src/bitcoin.js";
+
+test("public payment settings persist without setup and override the environment", () => {
+  const previous = process.env.NYM_PUBLIC_PAYMENTS;
+  const directory = mkdtempSync(join(tmpdir(), "tekiya-public-"));
+  const path = join(directory, "store.sqlite");
+  let store = new Store(path);
+  try {
+    delete process.env.NYM_PUBLIC_PAYMENTS;
+    assert.equal(publicPaymentsEnabled(store), false);
+    process.env.NYM_PUBLIC_PAYMENTS = "true";
+    assert.equal(publicPaymentsEnabled(store), true);
+    store.replace("public-payments", PublicPayments.parse({ enabled: false }));
+    store.close();
+    store = new Store(path);
+    assert.equal(publicPaymentsEnabled(store), false);
+    const view = { store, network: "testnet4" as const, monitor: {}, detectedOnion: undefined };
+    const disabled = dashboard(view);
+    assert.match(disabled, /action="\/settings\/public-payments"/);
+    assert.match(disabled, /name="enabled" value="true"/);
+    assert.match(disabled, /name="reviewed" value="yes" required/);
+    assert.match(disabled, /irreversible/);
+    assert.doesNotMatch(disabled, /NYM_PUBLIC_PAYMENTS/);
+    process.env.NYM_PUBLIC_PAYMENTS = "false";
+    store.replace("public-payments", PublicPayments.parse({ enabled: true }));
+    store.close();
+    store = new Store(path);
+    assert.equal(publicPaymentsEnabled(store), true);
+    const enabled = dashboard({ ...view, store });
+    assert.match(enabled, /name="enabled" value="false"/);
+    assert.doesNotMatch(enabled, /name="reviewed"/);
+    assert.throws(() => PublicPayments.parse({ enabled: "false" }));
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+    if (previous === undefined) delete process.env.NYM_PUBLIC_PAYMENTS;
+    else process.env.NYM_PUBLIC_PAYMENTS = previous;
+  }
+});
+
+test("web identity survives flags and currency switches; blocked admission consumes no quota", async () => {
+  const previous = process.env.NYM_PUBLIC_PAYMENTS;
+  process.env.NYM_PUBLIC_PAYMENTS = "true";
+  const store = new Store(":memory:");
+  const merchant = createWallet("22".repeat(64), "testnet4").sender;
+  const config = {
+    network: "testnet4" as const, seedHex: "11".repeat(64),
+    merchantCode: merchant.toBase58(),
+    onion: `http://${"a".repeat(56)}.onion`, apiToken: "33".repeat(32),
+  };
+  store.insert("config", config);
+  const funding = new Transaction();
+  funding.addInput(Buffer.alloc(32, 7), 0);
+  funding.addOutput(createWallet(config.seedHex, config.network).fundingScript, 50000n);
+  const pending = buildNotification(config, funding.toHex(), 0, 1000);
+  store.insert("notification", pending);
+  const healthy = {
+    txid: pending.txid, pairingGeneration: store.pairingGeneration(),
+    confirmations: 1, checkedAt: new Date().toISOString(),
+  };
+  store.insert("notification-health", healthy);
+  store.insert("approval", { txid: pending.txid, createdAt: "now", signature:
+    Buffer.from(messages.sign(identityStatement(config, pending),
+      merchant.getNotificationPrivateKey(), true,
+      profiles.testnet4.bitcoin.messagePrefix)).toString("base64") });
+  store.register(0, deriveAddress(config, 0));
+  const settings = {
+    enabled: true, address: "5".repeat(95), network: "stagenet",
+    node: "localhost:38081", account: 1, restoreHeight: 0,
+    walletFile: "test", walletPassword: "secret", enabledAt: "now",
+  };
+  const server = createServer((req, res) => void handlePublic(req, res, store, "testnet4"));
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const post = (nonce: string, amount: string, currency = "BTC") => fetch(`${base}/pay`, {
+    method: "POST", body: new URLSearchParams({ nonce, amount, currency }), redirect: "manual",
+  });
+  try {
+    const btc = "ab".repeat(16);
+    assert.equal((await post(btc, "0.1")).status, 303);
+    assert.equal(store.findWebRequest(`web_${btc}`)?.currency, "BTC");
+    store.register(1, deriveAddress(config, 1));
+    const allocation = store.findAllocation(`web_${btc}`);
+    for (const [name, unhealthy, reason] of [
+      ["unconfirmed", { ...healthy, confirmations: 0 }, /no longer confirmed/],
+      ["stale", { ...healthy, checkedAt: new Date(Date.now() - 11 * 60 * 1000).toISOString() }, /stale/],
+      ["missing", undefined, /verification pending/],
+      ["pairing", { ...healthy, pairingGeneration: "different-pairing" }, /verification pending/],
+      ["txid", { ...healthy, txid: "ff".repeat(32) }, /verification pending/],
+    ] as const) {
+      store.remove("notification-health");
+      if (unhealthy) store.insert("notification-health", unhealthy);
+      const nonce = "34".repeat(16);
+      const refused = await post(nonce, "0.1");
+      assert.equal(refused.status, 503, name);
+      assert.match(await refused.text(), reason, name);
+      assert.equal(store.findWebRequest(`web_${nonce}`), undefined, name);
+      assert.equal(store.findAllocation(`web_${nonce}`), undefined, name);
+      assert.equal((await post(btc, "0.1")).status, 303, name);
+      assert.equal((await fetch(`${base}/pay/${btc}/coin`, {
+        method: "POST", body: "coin=btc", redirect: "manual",
+      })).status, 303, name);
+      assert.deepEqual(store.findAllocation(`web_${btc}`), allocation, name);
+      assert.equal(store.nextIndex(), 1, name);
+      assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM web_requests").get()?.count, 1, name);
+    }
+    store.replace("notification-health", healthy);
+    store.insert(MONERO, settings);
+    assert.equal((await post(btc, "999", "XMR")).status, 303);
+    assert.equal(store.findAllocation(`web_${btc}`)?.amount_sats, 10000000);
+    const xmr = "cd".repeat(16);
+    assert.equal((await post(xmr, "2", "XMR")).status, 303);
+    store.remove(MONERO);
+    assert.equal((await post(xmr, "2", "BTC")).status, 303);
+    assert.equal(store.findWebRequest(`web_${xmr}`)?.currency, "XMR");
+    assert.equal(store.findAllocation(`web_${xmr}`), undefined);
+    assert.equal((await fetch(`${base}/pay/${xmr}/coin`, {
+      method: "POST", body: "coin=btc", redirect: "manual",
+    })).status, 303);
+    assert.equal(store.findAllocation(`web_${xmr}`)?.amount_sats, 0);
+    const blocked = "ef".repeat(16);
+    assert.equal((await post(blocked, "1.00000001")).status, 400);
+    assert.equal((await post(blocked, "0.1")).status, 503);
+    assert.equal((await post(blocked, "0.1", "XMR")).status, 503);
+    assert.equal(store.findWebRequest(`web_${blocked}`), undefined);
+    store.register(2, deriveAddress(config, 2));
+    const legacy = "12".repeat(16);
+    store.allocate(`web_${legacy}`, 42, index => deriveAddress(config, index));
+    process.env.NYM_PUBLIC_PAYMENTS = "false";
+    assert.equal((await post(legacy, "invalid", "XMR")).status, 303);
+    assert.equal(store.findWebRequest(`web_${legacy}`), undefined);
+    assert.equal((await fetch(`${base}/pay/${legacy}/coin`, {
+      method: "POST", body: "coin=btc", redirect: "manual",
+    })).status, 303);
+    assert.equal((await post(btc, "invalid")).status, 303);
+    assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM web_requests").get()?.count, 2);
+    store.register(3, deriveAddress(config, 3));
+    store.recordPayment(2, "44".repeat(32), 100);
+    store.allocate(TEST_REQUEST_ID, 0, index => deriveAddress(config, index));
+    store.insert("pairing", {
+      network: "testnet4", baseUrl: config.onion, apikey: "test",
+    });
+    store.insert(MONERO, settings);
+    const view = { store, network: config.network, monitor: {}, detectedOnion: undefined };
+    const disabled = dashboard(view);
+    assert.match(disabled, /Anonymous payments: .*disabled/);
+    assert.match(disabled, /Public page: .*not issuing/);
+    assert.match(disabled, /API readiness: Bitcoin .*not ready/);
+    assert.match(disabled, /Monero .*ready/);
+    process.env.NYM_PUBLIC_PAYMENTS = "true";
+    assert.match(dashboard(view), /Public page: .*accepting requests/);
+    assert.match(dashboard(view), /name="enabled" value="false"/);
+    store.remove(MONERO);
+    assert.match(dashboard(view), /Public page: .*not issuing/);
+  } finally {
+    if (previous === undefined) delete process.env.NYM_PUBLIC_PAYMENTS;
+    else process.env.NYM_PUBLIC_PAYMENTS = previous;
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    store.close();
+  }
+});
 
 test("payment-page storage is bounded and existing requests survive the cap", () => {
   const store = new Store(":memory:");
@@ -46,7 +213,8 @@ test("anonymous creation is opt-in; disabling preserves existing private pages",
       else process.env.NYM_PUBLIC_PAYMENTS = value;
       assert.equal(publicPaymentsEnabled(), value === "true");
     }
-    delete process.env.NYM_PUBLIC_PAYMENTS;
+    process.env.NYM_PUBLIC_PAYMENTS = "true";
+    store.replace("public-payments", { enabled: false });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     assert.equal((await fetch(base)).status, 503);
@@ -74,7 +242,7 @@ test("BTC amounts convert to exact satoshis", () => {
   assert.equal(parseBtcAmount("0.00000001"), 1);
   assert.equal(parseBtcAmount("1"), 100000000);
   assert.equal(parseBtcAmount("0.1"), 10000000);
-  for (const bad of ["abc", "1e3", "-1", "0.000000001", "1,5", ".5"]) {
+  for (const bad of ["abc", "1e3", "-1", "0.000000001", "1,5", ".5", "1.00000001", "2"]) {
     assert.throws(() => parseBtcAmount(bad), bad);
   }
 });

@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   ISSUANCE_LIMIT, RECEIVER_LOOKAHEAD, Unavailable, requireCondition,
@@ -85,6 +85,12 @@ export interface AllocateOptions {
 
 export class Store {
   readonly db: DatabaseSync;
+
+  pairingGeneration(): string {
+    return createHash("sha256").update(JSON.stringify(this.db.prepare(
+      "SELECT key, value FROM settings WHERE key IN ('pairing', 'pairing-generation') ORDER BY key",
+    ).all())).digest("hex");
+  }
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
@@ -259,6 +265,23 @@ export class Store {
   ): string | undefined {
     const halt = this.halted();
     if (halt) return `Issuance halted: ${halt.reason}`;
+
+    const notification = this.get("notification", z.object({ txid: z.string() }));
+    if (notification) {
+      const health = this.get("notification-health", z.object({
+        txid: z.string(), pairingGeneration: z.string(),
+        confirmations: z.number(), checkedAt: z.string(),
+      }));
+      if (!health || health.txid !== notification.txid ||
+          health.pairingGeneration !== this.pairingGeneration()) {
+        return "Notification verification pending";
+      }
+      if (health.confirmations < 1) return "Notification is no longer confirmed";
+      const age = Date.now() - Date.parse(health.checkedAt);
+      if (!Number.isFinite(age) || age < 0 || age > 10 * 60 * 1000) {
+        return "Notification verification is stale; waiting for the Dojo";
+      }
+    }
 
     const index = this.nextIndex();
     if (index >= ISSUANCE_LIMIT) {

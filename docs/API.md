@@ -15,7 +15,7 @@ address.
 - **Authentication:** `Authorization: Bearer <token>` on every request. The
   token is in the dashboard under *Integration API* (or `npm run cli --
   token`). Keep it on the server.
-- **Format:** JSON in and out. Amounts are integer satoshis.
+- **Format:** JSON in and out. Amounts are integer atomic units (satoshis or piconero).
 
 ## Create a payment request
 
@@ -70,7 +70,9 @@ It also has `assets.BTC` and `assets.XMR` (`enabled`, `issuing`,
 `reason`) for each coin. Call it before showing a checkout, so buyers see "temporarily unavailable"
 instead of an error at the last step. `ready` means setup and the
 merchant's approval are complete; `issuing` means the next POST should
-succeed.
+succeed according to local admission checks, not a guarantee of backend
+availability. These checks are independent of `NYM_PUBLIC_PAYMENTS`, which
+defaults to `false` and only controls anonymous web creation.
 
 ## Payment request
 
@@ -128,7 +130,15 @@ Errors return `{ "error": "<message>", "code": "<code>" }`.
 | 400 | `invalid_request` | Malformed body or headers, idempotency conflict. |
 | 401 | `unauthorized` | Missing or wrong bearer token. |
 | 404 | `not_found` | Unknown request id or endpoint. |
-| 503 | `unavailable` | No new address can be issued right now: not set up or approved, halted, paused by the lookahead rule, or the address limit reached. `error` says which. Nothing was allocated; retry later. |
+| 503 | `unavailable` | Issuance is blocked: not set up or approved, halted, paused by lookahead, at the address limit, or a Monero wallet reservation needs reconciliation. `error` says which. |
+
+A failed response, timeout, or lost connection does **not** prove that nothing
+was allocated. In particular, a Monero RPC mutation may have created a
+subaddress before its response or wallet save failed. Keep the original
+idempotency key, asset, and amount; read that request and retry with the same
+values, never a new key to bypass the failure. An ambiguous mutation leaves a
+durable reservation that may require operator reconciliation before retries
+can succeed. See the README recovery guidance; do not manually clear it.
 
 ## Limits to design around
 

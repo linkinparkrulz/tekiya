@@ -9,7 +9,7 @@ import {
 } from "./bitcoin.js";
 import { Store } from "./store.js";
 import { syncDojo } from "./registrar.js";
-import { connectDojo } from "./tor.js";
+import { connectPaired } from "./setup.js";
 
 process.umask(0o077);
 
@@ -76,7 +76,7 @@ async function main(): Promise<void> {
     const pairing = store.get("pairing", Pairing);
     requireCondition(pairing, "Import a Dojo pairing file first");
     const synced = await syncDojo(
-      store, config, await connectDojo(pairing, "testnet4"), { through: 4 },
+      store, config, await connectPaired(store, config), { through: 4 },
     );
     requireCondition(!synced.halted, synced.halted ?? "");
 

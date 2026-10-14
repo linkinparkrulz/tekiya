@@ -20,7 +20,10 @@ WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
-RUN mkdir -p /data && chown node:node /data
+# Named volumes inherit this ownership on their first mount.
+RUN mkdir -p /data /run/tekiya-admin \
+    && chown node:node /data /run/tekiya-admin \
+    && chmod 0700 /run/tekiya-admin
 USER node
 ENV NYM_DATA=/data
 ENTRYPOINT ["node", "dist/src/cli.js"]

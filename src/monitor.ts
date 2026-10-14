@@ -1,7 +1,7 @@
 import { Config, Pairing, Pending, type NetworkName } from "./config.js";
 import { syncDojo, type SyncResult } from "./registrar.js";
 import {
-  connectPaired, notificationStatus, observeFunding,
+  connectPaired, recordNotificationStatus, observeFunding,
   recordNotificationConfirmed,
   type FundingObservation,
 } from "./setup.js";
@@ -93,8 +93,8 @@ export class Monitor {
   }
 
   async #syncMonero(): Promise<void> {
-    if (!configuredMoneroSettings(this.store)) return;
     try {
+      if (!configuredMoneroSettings(this.store) || this.store.xmrIndices().length === 0) return;
       const result = await syncMonero(this.store);
       if (result) this.state.moneroHeight = result.height;
       this.state.moneroChecked = new Date().toISOString();
@@ -133,7 +133,7 @@ export class Monitor {
       } else {
         try {
           this.state.notificationConfirmations =
-            (await notificationStatus(api, pending)).confirmations;
+            (await recordNotificationStatus(this.store, api, pending)).confirmations;
           if (this.state.notificationConfirmations > 0) {
             recordNotificationConfirmed(this.store);
           }

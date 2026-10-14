@@ -10,7 +10,7 @@ import {
   buildNotification, createWallet, deriveAddress, receiver, reconstruct,
   segwitCode, verifyIdentity,
 } from "./bitcoin.js";
-import { syncDojo, type DojoApi } from "./registrar.js";
+import { assertPairedClient, pairingGeneration, syncDojo, type DojoApi } from "./registrar.js";
 import { Store, type Allocation } from "./store.js";
 import { connectDojo } from "./tor.js";
 
@@ -120,9 +120,12 @@ export async function pairDojo(
   config: Config,
   pairing: Pairing,
 ): Promise<{ api: DojoApi; replaced: boolean }> {
-  const api = await connectDojo(pairing, config.network);
+  const before = pairingGeneration(store);
+  await connectDojo(pairing, config.network);
+  requireCondition(pairingGeneration(store) === before, "Dojo pairing changed during login");
   const replaced = Boolean(store.get("pairing", Pairing));
   store.replacePairing(pairing);
+  const api = await connectPaired(store, config);
   return { api, replaced };
 }
 
@@ -191,12 +194,13 @@ export interface FeePreset {
 /** Fee choices from the Dojo's estimates, each at least MIN_FEE_RATE. */
 export function feePresets(fees: Record<string, number> = {}): FeePreset[] {
   const floor = (value: number | undefined) =>
-    Math.max(MIN_FEE_RATE, Math.ceil(value ?? 0));
+    Math.min(MAX_FEE_RATE, Math.max(MIN_FEE_RATE,
+      Math.ceil(Number.isFinite(value) ? value! : 0)));
   const economy = floor(fees["24"] ?? fees["12"] ?? fees["6"]);
   const standard = Math.max(economy, floor(fees["6"] ?? fees["4"]));
-  const priority = Math.max(
+  const priority = Math.min(MAX_FEE_RATE, Math.max(
     floor(fees["2"]), Math.ceil(standard * 1.5),
-  );
+  ));
   return [
     { id: "economy", label: "Economy", hint: "within a day", rate: economy },
     { id: "standard", label: "Standard", hint: "about an hour", rate: standard },
@@ -209,7 +213,8 @@ export const FEE_CHOICE = "fee-choice";
 export const FeeChoice = z.object({
   preset: z.enum(["economy", "standard", "priority", "custom"]),
   customRate: z.number().int().min(MIN_FEE_RATE).max(MAX_FEE_RATE).optional(),
-});
+}).refine(choice => choice.preset !== "custom" || choice.customRate !== undefined,
+  "Custom fee requires a rate");
 
 export type FeeChoice = z.infer<typeof FeeChoice>;
 
@@ -217,6 +222,7 @@ export function chosenRate(
   choice: FeeChoice | undefined,
   fees: Record<string, number> = {},
 ): number {
+  if (choice) FeeChoice.parse(choice);
   if (choice?.preset === "custom" && choice.customRate) return choice.customRate;
   const presets = feePresets(fees);
   return (presets.find(preset => preset.id === (choice?.preset ?? "standard"))
@@ -292,6 +298,8 @@ export async function prepareNotification(
   vout: number,
   feeSats: number,
 ): Promise<Pending> {
+  assertPairedClient(store, api);
+  const generation = pairingGeneration(store);
   requireCondition(
     !store.get("notification", Pending),
     "Notification already exists; refusing a second setup transaction",
@@ -305,6 +313,13 @@ export async function prepareNotification(
   const pending = buildNotification(config, previous.hex, vout, feeSats);
   requireCondition(pending.feeRate >= MIN_FEE_RATE,
     `The fee is below ${MIN_FEE_RATE} sat/vB`);
+  const funding = await observeFunding(config, api);
+  const matches = funding.utxos.filter(utxo => utxo.txid === txid && utxo.vout === vout);
+  requireCondition(matches.length === 1 && matches[0]!.confirmations > 0 &&
+    matches[0]!.value <= MAX_FUNDING_SATS &&
+    BigInt(matches[0]!.value) === Transaction.fromHex(previous.hex).outs[vout]?.value,
+  "Funding output is no longer confirmed and unspent, or its value differs");
+  requireCondition(pairingGeneration(store) === generation, "Dojo pairing changed during preparation");
   store.insert("notification", pending);
   return pending;
 }
@@ -388,7 +403,7 @@ export async function confirmedNotification(
   const pending = store.get("notification", Pending);
   requireCondition(pending, "Prepare a notification first");
   reconstruct(config, pending);
-  const { confirmations } = await notificationStatus(api, pending);
+  const { confirmations } = await recordNotificationStatus(store, api, pending);
   requireCondition(
     confirmations > 0,
     "The notification transaction is not confirmed yet",
@@ -459,8 +474,59 @@ export function approve(
   store.remove(REAPPROVAL_NOTICE);
 }
 
-export function connectPaired(store: Store, config: Config): Promise<DojoApi> {
+export async function connectPaired(store: Store, config: Config): Promise<DojoApi> {
   const pairing = store.get("pairing", Pairing);
   requireCondition(pairing, "Connect a Dojo first");
-  return connectDojo(pairing, config.network);
+  const generation = pairingGeneration(store);
+  const api = await connectDojo(pairing, config.network, generation);
+  assertPairedClient(store, api);
+  return api;
+}
+
+export const NOTIFICATION_HEALTH = "notification-health";
+export const NotificationHealth = z.object({
+  txid: z.string(), pairingGeneration: z.string(),
+  confirmations: z.number().int().nonnegative(), checkedAt: z.string(),
+});
+
+export function cachedConfirmedNotification(store: Store, config: Config): Pending {
+  const pending = store.get("notification", Pending);
+  requireCondition(pending, "Prepare a notification first");
+  reconstruct(config, pending);
+  const health = store.get(NOTIFICATION_HEALTH, NotificationHealth);
+  const age = health ? Date.now() - Date.parse(health.checkedAt) : NaN;
+  requireCondition(
+    health && health.txid === pending.txid &&
+      health.pairingGeneration === store.pairingGeneration() &&
+      health.confirmations > 0 && Number.isFinite(age) &&
+      age >= 0 && age <= 10 * 60 * 1000,
+    "Notification verification pending; waiting for the Dojo",
+  );
+  return pending;
+}
+
+/** Monitor must call this instead of notificationStatus and gate health on freshness. */
+export async function recordNotificationStatus(store: Store, api: DojoApi, pending: Pending) {
+  assertPairedClient(store, api);
+  const generation = pairingGeneration(store);
+  const revision = store.get("notification-health-revision", z.number().int()) ?? 0;
+  const status = await notificationStatus(api, pending);
+  store.db.exec("BEGIN IMMEDIATE");
+  try {
+    requireCondition(pairingGeneration(store) === generation &&
+      (store.get("notification-health-revision", z.number().int()) ?? 0) === revision &&
+      store.get("notification", Pending)?.txid === pending.txid,
+    "Notification observation is stale; results rejected");
+    store.replace(NOTIFICATION_HEALTH, {
+      txid: pending.txid, pairingGeneration: generation,
+      confirmations: status.confirmations, checkedAt: new Date().toISOString(),
+    });
+    store.replace("notification-health-revision", revision + 1);
+    if (status.confirmations > 0) recordNotificationConfirmed(store);
+    store.db.exec("COMMIT");
+  } catch (error) {
+    store.db.exec("ROLLBACK");
+    throw error;
+  }
+  return status;
 }

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   Approval, Config, ISSUANCE_LIMIT, Pairing, Pending, Profile,
-  RECEIVER_LOOKAHEAD, type NetworkName,
+  RECEIVER_LOOKAHEAD, publicPaymentsEnabled, type NetworkName,
 } from "./config.js";
 import {
   createWallet, deriveAddress, identityStatement, receiver,
@@ -346,6 +346,21 @@ function badge(ok: boolean, yes: string, no: string, bad = false): string {
     escape(ok ? yes : no)}</span>`;
 }
 
+function publicPaymentsForm(store: Store): string {
+  const enabled = publicPaymentsEnabled(store);
+  return `<form method="post" action="/settings/public-payments" class="stack">
+<input type="hidden" name="enabled" value="${enabled ? "false" : "true"}">
+${enabled ? `<p>Disabling stops new anonymous requests and new currency allocations.
+Existing payment pages remain accessible. The authenticated API is unaffected.</p>`
+    : `<div class="notice">Anyone with your public page can request addresses
+without paying. Allocations are irreversible and can exhaust issuance limits
+or the wallet's lookahead window, preventing further payments.</div>
+<label><input type="checkbox" name="reviewed" value="yes" required>
+I understand the risks of anonymous, irreversible address allocation.</label>`}
+<button type="submit">${enabled ? "Disable" : "Enable"} public payments</button>
+</form>`;
+}
+
 function liveView(view: View, config: Config): string {
   const { store, monitor } = view;
   const derive = (index: number): string => deriveAddress(config, index);
@@ -356,6 +371,9 @@ function liveView(view: View, config: Config): string {
   } catch {}
   const halt = store.halted();
   const blocker = store.issuanceBlocker(derive);
+  const btcReady = approved && !blocker;
+  const xmrReady = approved && !xmrBlocker(store);
+  const publicEnabled = publicPaymentsEnabled(store);
   const next = store.nextIndex();
   const lastPaid = store.lastConfirmedPayment();
   const profile = store.get("profile", Profile);
@@ -399,8 +417,13 @@ I have stopped every other copy and reviewed recovery.</label>
 <button type="submit">Resume issuance</button></form></div>` : ""}
 ${!halt && blocker ? `<div class="notice">${escape(blocker)}</div>` : ""}
 <section class="card"><h2>Your payment page</h2>
-<p>${badge(approved && !blocker, "live", "not issuing", Boolean(halt))}</p>
-<p>Share this address. It opens in Tor Browser:</p>
+<p>Anonymous payments: ${badge(publicEnabled, "opted in", "disabled")}</p>
+${publicPaymentsForm(store)}
+<p>Public page: ${badge(publicEnabled && (btcReady || xmrReady), "accepting requests", "not issuing")}</p>
+<p>API readiness: Bitcoin ${badge(btcReady, "ready", "not ready")};
+Monero ${badge(xmrReady, "ready", "not ready")}.</p>
+<p>API readiness is independent of anonymous opt-in and does not guarantee backend availability.</p>
+<p>${publicEnabled ? "Payment page address" : "Anonymous creation is disabled; the authenticated API remains available"}. Opens in Tor Browser:</p>
 <div class="address">${escape(config.onion)}/</div>
 <div class="actions">${checkButton("Check Dojo now")}</div>
 ${syncLine(monitor)}
@@ -551,7 +574,7 @@ ${rows.map(row => `<tr><td>${settings.account}/${row.subaddr_index}</td>
   const blocker = xmrBlocker(store);
 
   return `<section class="card"><h2>Monero</h2>
-<p>${badge(!monitor.moneroError && !blocker, "accepting", "not accepting")}
+<p>${badge(!blocker, "issuance checks passed", "issuance blocked")}
 <span class="muted">Account ${settings.account} of
 <span class="mono">${escape(settings.address.slice(0, 12))}…</span>
 · node <span class="mono">${escape(settings.node.slice(0, 24))}${
@@ -629,17 +652,16 @@ ${view.error ? `<div class="notice bad">${escape(view.error)}</div>` : ""}`;
     `<li class="${i < index ? "done" : i === index ? "current" : ""}">${
       escape(label)}</li>`).join("")}</ol>`;
 
-  // Waiting screens refresh themselves; screens with forms never do.
-  const waiting = step === "confirm" || step === "test-wait" ||
-    (step === "fund" && !usableFunding(view.monitor.funding?.utxos ?? []));
-
   return page("Set up Tekiya", `${top}
 <div class="layout">
 <aside class="stack"><section class="card"><h2>Setup</h2>${progress}</section>
 ${paynymCard(view)}</aside>
 <section class="card stack">${body}</section>
 </div>
+<section class="card"><h2>Public payments</h2>
+<p>Anonymous payments: ${badge(publicPaymentsEnabled(store), "opted in", "disabled")}</p>
+${publicPaymentsForm(store)}</section>
 <p class="muted">Setup ${index + 1} of ${PROGRESS.length}.
 Nothing here is shown on your public page.</p>`,
-  { wide: true, ...(waiting ? { refreshSeconds: 20 } : {}) });
+  { wide: true });
 }
