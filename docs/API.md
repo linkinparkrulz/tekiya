@@ -15,7 +15,7 @@ address.
 - **Authentication:** `Authorization: Bearer <token>` on every request. The
   token is in the dashboard under *Integration API* (or `npm run cli --
   token`). Keep it on the server.
-- **Format:** JSON in and out. Amounts are integer atomic units (satoshis or piconero).
+- **Format:** JSON in and out. Amounts are integer satoshis.
 
 ## Create a payment request
 
@@ -35,11 +35,8 @@ Content-Type: application/json
 - `amountSats`: 0–100,000,000. `0` means any amount; it is still put in
   the `bitcoin:` URI only when non-zero.
 
-For Monero (when enabled in the dashboard), send
-`{ "asset": "XMR", "amountAtomic": 50000000000 }` (piconero; 1 XMR =
-10¹² piconero). The response has the same shape with `asset: "XMR"`, a
-`monero:` URI, `network` `mainnet` or `stagenet`, and
-`confirmationsRequired: 10`. `asset` defaults to `BTC`.
+Tekiya is Bitcoin-only. `asset` may be omitted or sent as `"BTC"`; any
+other value is refused (`400 invalid_request`).
 
 Returns `200` with a [payment request](#payment-request).
 
@@ -51,8 +48,7 @@ Authorization: Bearer <token>
 ```
 
 Returns `200` with a [payment request](#payment-request), or
-`404 not_found`. A payment-page request can have both a Bitcoin and a
-Monero address; add `?asset=XMR` or `?asset=BTC` to choose.
+`404 not_found`.
 
 ## Check whether new requests can be created
 
@@ -66,8 +62,7 @@ Authorization: Bearer <token>
   "reason": "Issuance paused: the next address would be beyond the receiving wallet's lookahead until a payment confirms" }
 ```
 
-It also has `assets.BTC` and `assets.XMR` (`enabled`, `issuing`,
-`reason`) for each coin. Call it before showing a checkout, so buyers see "temporarily unavailable"
+It also has `assets.BTC` (`issuing`, `reason`). Call it before showing a checkout, so buyers see "temporarily unavailable"
 instead of an error at the last step. `ready` means setup and the
 merchant's approval are complete; `issuing` means the next POST should
 succeed according to local admission checks, not a guarantee of backend
@@ -130,7 +125,7 @@ Errors return `{ "error": "<message>", "code": "<code>" }`.
 | 400 | `invalid_request` | Malformed body or headers, idempotency conflict. |
 | 401 | `unauthorized` | Missing or wrong bearer token. |
 | 404 | `not_found` | Unknown request id or endpoint. |
-| 503 | `unavailable` | Issuance is blocked: not set up or approved, halted, paused by lookahead, at the address limit, or the Monero watcher is unreachable or does not yet watch the next subaddress. `error` says which. |
+| 503 | `unavailable` | Issuance is blocked: not set up or approved, halted, paused by lookahead, at the address limit. `error` says which. |
 
 A failed response, timeout, or lost connection does **not** prove that nothing
 was allocated. Keep the original idempotency key, asset, and amount; read that
@@ -146,8 +141,6 @@ request and retry with the same values, never a new key to bypass the failure.
   orders in a row pause new requests (`503 unavailable`).
 - **Staging cap.** This development build issues at most 5 addresses per
   installation.
-- **Amounts in atomic units.** Sats for Bitcoin, piconero for Monero.
+- **Amounts in satoshis.**
   Convert fiat prices in your application and lock the quote for as long
   as you keep the order open.
-- **Monero** confirms after 10 blocks (about 20 minutes) and pauses after
-  150 unused subaddresses in a row.

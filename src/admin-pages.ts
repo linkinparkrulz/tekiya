@@ -19,10 +19,6 @@ import {
   fundingRequired, usableFunding,
 } from "./setup.js";
 import { paynymStatus } from "./paynym.js";
-import {
-  MONERO, MoneroSettings, XMR_CONFIRMATIONS, formatXmr, moneroNetwork,
-  xmrBlocker,
-} from "./monero.js";
 import { Store } from "./store.js";
 
 export type Step =
@@ -372,7 +368,6 @@ function liveView(view: View, config: Config): string {
   const halt = store.halted();
   const blocker = store.issuanceBlocker(derive);
   const btcReady = approved && !blocker;
-  const xmrReady = approved && !xmrBlocker(store);
   const publicEnabled = publicPaymentsEnabled(store);
   const next = store.nextIndex();
   const lastPaid = store.lastConfirmedPayment();
@@ -419,9 +414,8 @@ ${!halt && blocker ? `<div class="notice">${escape(blocker)}</div>` : ""}
 <section class="card"><h2>Your payment page</h2>
 <p>Anonymous payments: ${badge(publicEnabled, "opted in", "disabled")}</p>
 ${publicPaymentsForm(store)}
-<p>Public page: ${badge(publicEnabled && (btcReady || xmrReady), "accepting requests", "not issuing")}</p>
-<p>API readiness: Bitcoin ${badge(btcReady, "ready", "not ready")};
-Monero ${badge(xmrReady, "ready", "not ready")}.</p>
+<p>Public page: ${badge(publicEnabled && btcReady, "accepting requests", "not issuing")}</p>
+<p>API readiness: ${badge(btcReady, "ready", "not ready")}</p>
 <p>API readiness is independent of anonymous opt-in and does not guarantee backend availability.</p>
 <p>${publicEnabled ? "Payment page address" : "Anonymous creation is disabled; the authenticated API remains available"}. Opens in Tor Browser:</p>
 <div class="address">${escape(config.onion)}/</div>
@@ -468,7 +462,6 @@ on your server, never in browser code. Full reference:
 <code>docs/API.md</code> in the Tekiya repository.</p>
 <div class="address">${escape(config.apiToken)}</div>
 </details>
-${moneroCard(view)}
 ${paynymCard(view)}
 <details class="card"><summary>Identity</summary><dl>
 <dt>Network</dt><dd>${escape(config.network)}</dd>
@@ -479,122 +472,6 @@ ${paynymCard(view)}
 </dl></details>`;
 }
 
-const XmrRow = z.object({
-  request_id: z.string(),
-  subaddr_index: z.number().int(),
-  address: z.string(),
-  amount_atomic: z.number().int(),
-  created_at: z.string(),
-  confirmed_atomic: z.number().int().nullable(),
-  pending_atomic: z.number().int().nullable(),
-});
-
-function xmrCell(confirmed: number | null, pending: number | null): string {
-  if (confirmed === null) return '<span class="muted">checking…</span>';
-  if (confirmed + (pending ?? 0) === 0) {
-    return '<span class="muted">nothing yet</span>';
-  }
-  return `<span class="copyable nowrap">${escape(formatXmr(confirmed))} XMR</span>${
-    pending ? `<br><span class="muted nowrap">+${
-      escape(formatXmr(pending))} pending</span>` : ""}`;
-}
-
-function moneroCard(view: View): string {
-  const { store, monitor } = view;
-  const settings = store.get(MONERO, MoneroSettings);
-  const network = moneroNetwork(view.network);
-  const draft = view.draft ?? {};
-  const field = (name: string, saved: string | number | undefined) =>
-    escape(draft[name] ?? saved ?? "");
-
-  if (!settings?.enabled) {
-    return `<details class="card"${"viewKey" in draft || "address" in draft
-      ? " open" : ""}><summary>Monero
-(optional)</summary>
-<p>Accept Monero too. From your primary address and private view key,
-Tekiya works out a fresh subaddress for each payment, and a view-only
-watcher sees incoming payments. Neither can spend.</p>
-<div class="notice">The view key is kept on this server and shows it every
-payment your wallet receives. Use a dedicated wallet, or at least a
-dedicated account.</div>
-${settings ? `<p class="hint">Previously set up for
-<span class="mono">${escape(settings.address.slice(0, 12))}…</span>; enabling
-again reuses that wallet.</p>` : ""}
-<form method="post" action="/monero/enable" class="stack">
-<div><label for="xmrAddress">Primary address (${escape(network)})</label>
-<input type="text" id="xmrAddress" name="address" autocomplete="off"
-  value="${field("address", settings?.address)}" required
-  placeholder="${network === "mainnet" ? "4…" : "5…"}"></div>
-<div><label for="viewKey">Private view key</label>
-<input type="text" id="viewKey" name="viewKey" autocomplete="off" required
-  placeholder="64 hexadecimal characters">
-<p class="hint">In Feather or Monero GUI: Wallet → Keys. Never enter the
-spend key or seed.</p></div>
-<div><label for="node">Monero node</label>
-<input type="text" id="node" name="node" autocomplete="off" required
-  value="${field("node", settings?.node)}" placeholder="${network === "mainnet"
-    ? "abc…xyz.onion:18081" : "stagenet.community.rino.io:38081"}">
-<p class="hint">${network === "mainnet"
-    ? "A .onion node (reached through Tor) or one on your own machine or network."
-    : "A .onion or clearnet stagenet node (always reached through Tor), or " +
-      "one on your own network."}</p></div>
-<div><label for="restoreHeight">Restore height
-<span class="muted">(optional)</span></label>
-<input type="number" id="restoreHeight" name="restoreHeight" min="0"
-  value="${field("restoreHeight", settings?.restoreHeight)}">
-<p class="hint">The wallet's creation height; speeds up the first scan.</p></div>
-<div><label for="account">Account</label>
-<input type="number" id="account" name="account" min="1" max="49"
-  value="${field("account", settings?.account ?? 1)}">
-<p class="hint">Payments to Tekiya land in this account of your wallet; in
-Feather, find it in the account list. Account 0 is your wallet's own, so
-Tekiya uses a separate one and never hands out an address your wallet also
-shows. Keep 1 unless you already use it.</p></div>
-<button type="submit">Enable Monero</button>
-</form></details>`;
-  }
-
-  const rows = z.array(XmrRow).parse(store.db.prepare(`
-    SELECT a.*, v.confirmed_atomic, v.pending_atomic
-    FROM xmr_allocations a LEFT JOIN xmr_received v
-      ON v.subaddr_index = a.subaddr_index
-    ORDER BY a.subaddr_index DESC
-  `).all());
-  const table = rows.length === 0
-    ? '<p class="muted">No Monero subaddresses issued yet.</p>'
-    : `<div class="table-wrap"><table>
-<thead><tr><th>#</th><th>Subaddress</th><th>Received</th><th>Requested</th>
-<th>Issued</th></tr></thead><tbody>
-${rows.map(row => `<tr><td>${settings.account}/${row.subaddr_index}</td>
-<td>${shortAddress(row.address)}</td>
-<td>${xmrCell(row.confirmed_atomic, row.pending_atomic)}</td>
-<td class="nowrap">${row.amount_atomic
-    ? `${escape(formatXmr(row.amount_atomic))} XMR` : "—"}</td>
-<td class="nowrap">${escape(formatTime(row.created_at))}</td></tr>`).join("")}
-</tbody></table></div>`;
-  const blocker = xmrBlocker(store);
-
-  return `<section class="card"><h2>Monero</h2>
-<p>${badge(!blocker, "issuance checks passed", "issuance blocked")}
-<span class="muted">Account ${settings.account} of
-<span class="mono">${escape(settings.address.slice(0, 12))}…</span>
-· node <span class="mono">${escape(settings.node.slice(0, 24))}${
-  settings.node.length > 24 ? "…" : ""}</span></span></p>
-${monitor.moneroError ? `<div class="notice bad">${
-    escape(monitor.moneroError)}</div>` : ""}
-${blocker ? `<div class="notice">${escape(blocker)}</div>` : ""}
-<p class="hint">${monitor.moneroHeight
-    ? `Wallet height ${escape(monitor.moneroHeight)}, checked ${
-      escape(formatTime(monitor.moneroChecked ?? ""))}.`
-    : "Waiting for the wallet to sync…"} Paid after ${XMR_CONFIRMATIONS}
-confirmations.</p>
-${table}
-<form method="post" action="/monero/disable" class="actions">
-<button class="secondary" type="submit">Disable Monero</button></form>
-</section>`;
-}
-
-// Runs in the background as soon as the dispenser wallet exists.
 function paynymCard(view: View): string {
   const { store, monitor } = view;
   if (!store.get("config", Config)) return "";

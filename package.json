@@ -16,8 +16,6 @@
   "dependencies": {
     "@dojo-tools/bip47": "2.0.1",
     "@dojo-tools/bitcoinjs-message": "4.0.1",
-    "@noble/curves": "2.4.0",
-    "@noble/hashes": "2.3.0",
     "bip32": "5.0.1",
     "bitcoinjs-lib": "7.0.1",
     "qrcode-generator": "1.4.4",

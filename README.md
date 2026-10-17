@@ -58,52 +58,6 @@ Following publishes the dispenser–merchant relationship in a public
 directory. It does not affect payment discovery, which relies on the
 notification transaction.
 
-## Monero (optional)
-
-Start the view-only watcher with
-`docker compose --profile monero up -d --build`, then open **Monero** in
-the dashboard and enter the wallet's primary address, private view key and
-a node (a `.onion` node, reached through Tor, or one on your own machine or
-network). On testnet4 installations Monero uses stagenet, where clearnet
-nodes are also accepted, always reached through Tor, because public
-stagenet nodes are mostly clearnet (for example
-`stagenet.community.rino.io:38081`). Mainnet never accepts clearnet nodes.
-
-To test, run Feather with `feather --stagenet`, create a wallet, copy its
-primary address (starts with `5`) and private view key (Wallet → Keys),
-and get stagenet coins from a faucet such as `stagenet-faucet.xmr-tw.org`
-(third-party).
-
-Tekiya derives each payment's subaddress itself from the primary address
-and view key, the way any Monero wallet does, in a dedicated account
-(default 1), so it never hands out an address the merchant's wallet shows
-elsewhere. Monero wallets find payments to it on their own. Issuing an
-address changes nothing in any wallet, so there is nothing to keep in step
-or recover after a failure: a failed request is simply retried.
-
-To see payments, a view-only `monero-wallet-rpc` watches the chain. It is
-created from the same keys during setup and only reads; before each
-address is handed out, Tekiya checks that the watcher recognizes it.
-Nothing involved can spend. The view key is stored in Tekiya's database
-(and in the watcher's wallet file), so back up and protect that data like
-the rest of Tekiya's state. Installations set up before this change ask
-for the view key once more under **Monero** in the dashboard.
-In Feather, payments to Tekiya appear under that account in the account
-list, not in account 0.
-Payments count as paid after 10 confirmations, and issuing pauses after 150
-unused subaddresses in a row.
-
-A view key reveals every payment the wallet receives to this server: use a
-dedicated wallet, or at least a dedicated account.
-
-On the payment page, payers choose Bitcoin or Monero; only the chosen
-coin's address is created. One QR cannot serve both, since each wallet
-only understands its own `bitcoin:` or `monero:` link.
-
-The wallet image verifies the release: `hashes.txt` must carry a valid
-signature from binaryFate's release key (fingerprint pinned in
-`deploy/Monero.Dockerfile`), and the archive must match its SHA-256.
-
 ## Integration API
 
 Shops and other backends request a fresh address per order and follow its
@@ -134,8 +88,8 @@ app user (UID 1000). Only the app and forwarder mount the `admin-socket`
 volume; the image initializes its directory ownership on first use. The
 forwarder runs as the same UID and publishes only `127.0.0.1:8089`.
 It alone joins the noninternal dashboard host-publishing network; the app
-joins only the internal private network, with no direct egress. Tor and
-Monero cannot access the admin socket. Dashboard HTTP is not encrypted:
+joins only the internal private network, with no direct egress. Tor
+cannot access the admin socket. Dashboard HTTP is not encrypted:
 keep the forwarder on localhost and use SSH tunnelling for remote access,
 not a public port or unencrypted LAN connection.
 
@@ -181,9 +135,6 @@ The normal pairing API does not report import success: an echoed address
 is not proof of tracking. Verify tracking in Dojo's administrative tools
 and test merchant-wallet receipt before using real funds. Incomplete
 transaction-history responses are rejected instead of replacing totals.
-
-Payment-page requests are capped at 1,000 persisted records per installation.
-Existing requests remain readable at the cap; records are not silently recycled.
 
 Bitcoin issuance and dashboard setup actions require a matching positive
 notification observation no older than ten minutes. The monitor refreshes this
@@ -235,10 +186,7 @@ the onion service. Visitors
 request a fresh address, optionally with an amount, and get the address,
 a QR code and a `bitcoin:` link at a private `/pay/...` URL. Pages use no
 JavaScript or external resources and work in Tor Browser's Safest mode.
-Resubmitting the form returns the same address.
-Every new request retains its original currency and amount, even when Monero
-is later enabled or disabled. Switching coins does not convert the amount:
-the other coin uses an unspecified amount. Existing allocations remain readable.
+Resubmitting the form returns the same address and amount.
 
 Set the page's name and optional description in the dashboard or with
 `profile "Corner Café" "Support the community garden."` (name up to 80
@@ -246,13 +194,12 @@ characters, description up to 280, plain text). Changes apply on the next
 page load; `profile --clear` restores the default "Pay with Bitcoin".
 
 Public payments are disabled by default. Enabling them allows anonymous
-requests and new coin allocations. Disabling them later
+requests and new address allocations. Disabling them later
 leaves existing private `/pay/...` pages readable but prevents creation of
 new addresses there. The token-protected integration API is unaffected.
 
 Opting in accepts anonymous exhaustion risk: anyone can use up staging
-addresses, trigger the receiving-wallet lookahead pause, exhaust Monero's
-unused-subaddress allowance, or fill the durable 1,000 web-request quota.
+addresses or trigger the receiving-wallet lookahead pause.
 Abandoned requests and addresses are not recycled. Rate limiting alone
 cannot make irreversible anonymous allocation safe, including over Tor.
 Use the authenticated API unless you deliberately accept this risk.

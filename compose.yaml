@@ -10,15 +10,10 @@ services:
       NYM_ADMIN_AUTH: setup
       NYM_ADMIN_SOCKET: /run/tekiya-admin/admin.sock
       NYM_ONION_HOSTNAME_FILE: /onion/hostname
-      # Optional Monero (start with: docker compose --profile monero up -d)
-      NYM_MONERO_RPC: http://monero-wallet:18083/json_rpc
-      NYM_MONERO_RPC_LOGIN_FILE: /monero-secret/rpc-login
-      NYM_MONERO_PROXY: tor:9050
     volumes:
       - app-data:/data
       - admin-socket:/run/tekiya-admin
       - onion-name:/onion:ro
-      - monero-secret:/monero-secret:ro
     networks:
       - private
     read_only: true
@@ -40,29 +35,6 @@ services:
     networks:
       - private
       - outbound
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
-
-  monero-wallet:
-    profiles: ["monero"]
-    build:
-      context: deploy
-      dockerfile: Monero.Dockerfile
-    environment:
-      NYM_NETWORK: ${NYM_NETWORK:-testnet4}
-    volumes:
-      - monero-wallet:/wallet
-      - monero-secret:/monero-secret
-    # Onion nodes are reached through the tor service. For a node on your
-    # LAN, also add the "outbound" network here.
-    networks:
-      - private
-    read_only: true
-    tmpfs:
-      - /tmp
     cap_drop:
       - ALL
     security_opt:
@@ -105,5 +77,3 @@ volumes:
   admin-socket: {}
   tor-data: {}
   onion-name: {}
-  monero-wallet: {}
-  monero-secret: {}

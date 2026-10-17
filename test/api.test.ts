@@ -94,7 +94,6 @@ test("a store can create a request and follow it to paid", async () => {
         network, ready: true, issuing: true, reason: null,
         assets: {
           BTC: { issuing: true, reason: null },
-          XMR: { enabled: false, issuing: false, reason: "Monero is not enabled" },
         },
       },
     );
@@ -125,6 +124,15 @@ test("a store can create a request and follow it to paid", async () => {
     const conflict = await create(base, "order_0000000000000001", 6000);
     assert.equal(conflict.status, 400);
     assert.equal(conflict.body.code, "invalid_request");
+
+    // Bitcoin only: another asset is refused.
+    const xmr = await call(base, "/v1/payment-requests", {
+      method: "POST",
+      headers: { ...auth, "idempotency-key": "order_0000000000000002" },
+      body: { asset: "XMR", amountAtomic: 1 },
+    });
+    assert.equal(xmr.status, 400);
+    assert.equal(xmr.body.code, "invalid_request");
 
     const unknown = await call(base, "/v1/payment-requests/nope", { headers: auth });
     assert.equal(unknown.status, 404);

@@ -42,33 +42,6 @@ const StatusRow = Allocation.extend({
   block_height: z.number().int().nullable(),
 });
 
-export const XmrAllocation = z.object({
-  request_id: z.string(),
-  subaddr_index: z.number().int(),
-  address: z.string(),
-  amount_atomic: z.number().int(),
-  created_at: z.string(),
-});
-
-export type XmrAllocation = z.infer<typeof XmrAllocation>;
-
-const WebRequest = z.object({
-  request_id: z.string(),
-  currency: z.enum(["BTC", "XMR"]),
-  amount_atomic: z.number().int(),
-  created_at: z.string(),
-});
-
-export type WebRequest = z.infer<typeof WebRequest>;
-
-export interface XmrPaymentStatus {
-  readonly allocation: XmrAllocation;
-  readonly confirmedAtomic: number;
-  readonly pendingAtomic: number;
-  readonly state: PaymentState;
-  readonly checkedAt: string | null;
-}
-
 export interface PaymentStatus {
   readonly allocation: Allocation;
   readonly confirmedSats: number;
@@ -120,27 +93,6 @@ export class Store {
         idx INTEGER PRIMARY KEY,
         confirmed_sats INTEGER NOT NULL,
         unconfirmed_sats INTEGER NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      -- Monero subaddresses in Tekiya's account of the merchant's wallet.
-      CREATE TABLE IF NOT EXISTS xmr_allocations (
-        request_id TEXT PRIMARY KEY,
-        subaddr_index INTEGER UNIQUE NOT NULL,
-        address TEXT UNIQUE NOT NULL,
-        amount_atomic INTEGER NOT NULL,
-        created_at TEXT NOT NULL
-      );
-      -- Payment-page requests made before the payer picks a coin.
-      CREATE TABLE IF NOT EXISTS web_requests (
-        request_id TEXT PRIMARY KEY,
-        currency TEXT NOT NULL,
-        amount_atomic INTEGER NOT NULL,
-        created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS xmr_received (
-        subaddr_index INTEGER PRIMARY KEY,
-        confirmed_atomic INTEGER NOT NULL,
-        pending_atomic INTEGER NOT NULL,
         updated_at TEXT NOT NULL
       );
       -- First confirmed payment observed for an allocated index.
@@ -325,87 +277,6 @@ export class Store {
       state: paymentState(value.amount_sats, confirmed, unconfirmed),
       firstConfirmedBlock: value.block_height,
       checkedAt: value.updated_at,
-    };
-  }
-
-  // First submission wins; a resubmitted form keeps the original request.
-  createWebRequest(id: string, currency: "BTC" | "XMR", amount: number): void {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      if (!this.findWebRequest(id)) {
-        const row = this.db.prepare("SELECT COUNT(*) AS count FROM web_requests").get();
-        if (Number(row?.count) >= 1000) {
-          throw new Unavailable("Payment-page request limit reached");
-        }
-        this.db.prepare("INSERT INTO web_requests VALUES (?, ?, ?, ?)")
-          .run(id, currency, amount, new Date().toISOString());
-      }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  findWebRequest(id: string): WebRequest | undefined {
-    const row = this.db.prepare(
-      "SELECT * FROM web_requests WHERE request_id = ?",
-    ).get(id);
-    return row ? WebRequest.parse(row) : undefined;
-  }
-
-  findXmr(id: string): XmrAllocation | undefined {
-    const row = this.db.prepare(
-      "SELECT * FROM xmr_allocations WHERE request_id = ?",
-    ).get(id);
-    return row ? XmrAllocation.parse(row) : undefined;
-  }
-
-  insertXmr(allocation: XmrAllocation): void {
-    this.db.prepare("INSERT INTO xmr_allocations VALUES (?, ?, ?, ?, ?)").run(
-      allocation.request_id, allocation.subaddr_index, allocation.address,
-      allocation.amount_atomic, allocation.created_at,
-    );
-  }
-
-  xmrIndices(): number[] {
-    return this.db.prepare(
-      "SELECT subaddr_index FROM xmr_allocations ORDER BY subaddr_index",
-    ).all().map(row => z.number().int().parse(row.subaddr_index));
-  }
-
-  recordXmrReceived(index: number, confirmed: number, pending: number): void {
-    this.db.prepare(
-      "INSERT OR REPLACE INTO xmr_received VALUES (?, ?, ?, ?)",
-    ).run(index, confirmed, pending, new Date().toISOString());
-  }
-
-  // Unused subaddresses issued after the last one that received anything.
-  xmrUnusedRun(): number {
-    const row = this.db.prepare(`
-      SELECT COUNT(*) AS run FROM xmr_allocations a
-      WHERE a.subaddr_index > COALESCE((
-        SELECT MAX(subaddr_index) FROM xmr_received
-        WHERE confirmed_atomic + pending_atomic > 0
-      ), 0)
-    `).get();
-    return z.number().int().parse(row?.run);
-  }
-
-  xmrPaymentStatus(id: string): XmrPaymentStatus | undefined {
-    const allocation = this.findXmr(id);
-    if (!allocation) return undefined;
-    const row = this.db.prepare(
-      "SELECT * FROM xmr_received WHERE subaddr_index = ?",
-    ).get(allocation.subaddr_index);
-    const confirmed = row ? z.number().int().parse(row.confirmed_atomic) : 0;
-    const pending = row ? z.number().int().parse(row.pending_atomic) : 0;
-    return {
-      allocation,
-      confirmedAtomic: confirmed,
-      pendingAtomic: pending,
-      state: paymentState(allocation.amount_atomic, confirmed, pending),
-      checkedAt: row ? z.string().parse(row.updated_at) : null,
     };
   }
 
